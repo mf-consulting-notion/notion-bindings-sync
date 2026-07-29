@@ -50,10 +50,14 @@ jobs:
           # dry-run: "true"   # optional: report the diff without writing
 ```
 
-## One-time org setup
+## One-time setup per caller repo
 
-- **Secret**: add `NOTION_BINDINGS_TOKEN` (scope above) as an **org** Actions
-  secret so every caller inherits it.
+- **Secret**: add `NOTION_BINDINGS_TOKEN` (scope above) as a **repo** Actions
+  secret in each caller. An org-wide secret would be simpler (set once, every
+  caller inherits it), but that scoping requires a paid GitHub org plan, which
+  `mf-consulting-notion` isn't on — so each repo gets its own copy of the same
+  token value instead (stored in 1Password, item "Sync Bindings"). If the org
+  ever upgrades, these can be consolidated back into one org secret.
 - **Private action access**: this repo is private, so let other org repos consume
   its action — *Settings → Actions → General → Access → "Accessible from
   repositories in the mf-consulting-notion organization"*.

@@ -1,0 +1,15 @@
+name: Sync Notion property bindings
+on:
+  push:
+    branches: [main]
+    paths: [bindings.json]
+  workflow_dispatch:
+jobs:
+  sync-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mf-consulting-notion/notion-bindings-sync@v1
+        with:
+          notion-token: ${{ secrets.NOTION_BINDINGS_TOKEN }}
+          # dry-run: "true"   # optional: report the diff without writing
