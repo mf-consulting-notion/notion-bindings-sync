@@ -1,0 +1,18 @@
+{
+  "buildPageId": "3ac9eca4-d310-81a0-8d99-f49e6bea7a37",
+  "workspaceNotionId": "2971ba4c-786b-4af9-982a-8fa3b8bf1116",
+  "databases": [
+    {
+      "id": "7d1aeaec-129e-4dde-9040-5761c86aef54",
+      "name": "Synced Properties",
+      "bindings": [
+        { "property": "Property Name", "propertyId": "title", "direction": "both" },
+        { "property": "Property Notion ID", "propertyId": "w~gw", "direction": "both" },
+        { "property": "Database Notion ID", "propertyId": "joTm", "direction": "both" },
+        { "property": "Workspace Notion ID", "propertyId": "%7DHJ_", "direction": "write" },
+        { "property": "Build", "propertyId": "oXMu", "direction": "both" },
+        { "property": "Direction", "propertyId": "pbeH", "direction": "both" }
+      ]
+    }
+  ]
+}
