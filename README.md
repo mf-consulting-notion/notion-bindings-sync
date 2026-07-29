@@ -19,8 +19,9 @@ introspection, no LLM.
 
 Because ids are pre-resolved in the manifest, this action only ever reads/writes
 **MF** databases — regardless of which workspace the integration itself writes to
-(a client build's db/property ids ride in the manifest as plain text). So a
-single MF-scoped token, stored once as an org secret, serves all callers.
+(a client build's db/property ids ride in the manifest as plain text). So the
+*same* MF-scoped token value serves every caller — currently copied into each
+repo as its own secret rather than set once org-wide (see "One-time setup" below).
 
 **Token scope** (`NOTION_BINDINGS_TOKEN`): a Notion internal integration with
 - **write** on *Synced Properties*
@@ -70,24 +71,26 @@ contract or the reconcile semantics → bump to `@v2`.
 
 ## Manifest shape
 
+Canonical reference (field meanings, the ids-pre-resolved rule, full example):
+[bindings.json Manifest — Reference (v1)](https://app.notion.com/p/80f67a0876604e4a87148638c47be92a)
+in MF Consulting → Docs. Don't re-derive the shape from this repo's code as a
+substitute for reading it — that's how the two drift. Shortest possible shape,
+for orientation only:
+
 ```json
 {
-  "buildPageId": "<Builds registry page id — the Build relation target>",
-  "workspaceNotionId": "<the target workspace's Notion id>",
+  "buildPageId": "<Builds registry page id>",
+  "workspaceNotionId": "<target workspace's Notion id>",
   "databases": [
-    {
-      "id": "<target data_source_id>",
-      "name": "Human label (doc only)",
-      "bindings": [
-        { "property": "Status", "propertyId": "XIvk", "direction": "both" }
-      ]
-    }
+    { "id": "<data_source_id>", "name": "Human label", "bindings": [
+      { "property": "Status", "propertyId": "XIvk", "direction": "both" }
+    ] }
   ]
 }
 ```
 
-`direction` ∈ `read | write | both`. A binding without a `propertyId` fails the
-run — resolution is the authoring tool's job (`register-build` phase 2), not CI's.
+A binding without a `propertyId` fails the run — resolution is the authoring
+tool's job (`register-build` phase 2), not CI's.
 
 ## Local dry-run
 
