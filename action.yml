@@ -1,0 +1,39 @@
+name: Sync Notion property bindings
+description: >-
+  Push a repo's bindings.json (Build→Property bindings, ids resolved at authoring
+  time) into the MF "Synced Properties" mapping DB. Deterministic, per-build
+  upsert + prune; reads no target databases, so the token needs only WRITE on
+  Synced Properties + READ on Builds.
+
+inputs:
+  notion-token:
+    description: Notion token with WRITE on Synced Properties + READ on Builds. One MF-scoped token serves every integration.
+    required: true
+  manifest:
+    description: Path to the bindings manifest in the caller repo.
+    required: false
+    default: bindings.json
+  synced-properties-ds:
+    description: Data-source id of the Synced Properties DB (override only if it moves).
+    required: false
+    default: 7d1aeaec-129e-4dde-9040-5761c86aef54
+  dry-run:
+    description: "true = report the diff without writing."
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+    - shell: bash
+      env:
+        NOTION_TOKEN: ${{ inputs.notion-token }}
+        MANIFEST: ${{ inputs.manifest }}
+        SYNCED_PROPERTIES_DS: ${{ inputs.synced-properties-ds }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      # $GITHUB_ACTION_PATH resolves to this action's dir (auto-fetched by GitHub);
+      # the script reads the manifest from the caller's checkout (the cwd).
+      run: node "$GITHUB_ACTION_PATH/sync-bindings.mjs"
