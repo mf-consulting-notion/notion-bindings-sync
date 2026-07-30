@@ -1,14 +1,20 @@
 name: Sync Notion property bindings
 description: >-
-  Push a repo's bindings.json (Build→Property bindings, ids resolved at authoring
-  time) into the MF "Synced Properties" mapping DB. Deterministic, per-build
-  upsert + prune; reads no target databases, so the token needs only WRITE on
-  Synced Properties + READ on Builds.
+  Two modes. sync (default): push a repo's bindings.json (Build→Property bindings,
+  ids resolved at authoring time) into the MF "Synced Properties" mapping DB —
+  deterministic per-build upsert + prune; reads no target databases, so the token
+  needs only WRITE on Synced Properties + READ on Builds. verify: a PR gate (no
+  token) that fails when a PR changes Notion call-sites but leaves bindings.json
+  untouched, so the mapping can't silently drift from the code.
 
 inputs:
+  mode:
+    description: "sync (default) = reconcile bindings.json into Synced Properties. verify = PR drift gate (needs no token)."
+    required: false
+    default: sync
   notion-token:
-    description: Notion token with WRITE on Synced Properties + READ on Builds. One MF-scoped token serves every integration.
-    required: true
+    description: "sync mode: Notion token with WRITE on Synced Properties + READ on Builds. One MF-scoped token serves every integration."
+    required: false
   manifest:
     description: Path to the bindings manifest in the caller repo.
     required: false
@@ -18,9 +24,21 @@ inputs:
     required: false
     default: 7d1aeaec-129e-4dde-9040-5761c86aef54
   dry-run:
-    description: "true = report the diff without writing."
+    description: "sync mode: true = report the diff without writing."
     required: false
     default: "false"
+  base-sha:
+    description: "verify mode: PR base commit (github.event.pull_request.base.sha)."
+    required: false
+  head-sha:
+    description: "verify mode: PR head commit (github.event.pull_request.head.sha)."
+    required: false
+  pr-title:
+    description: "verify mode: PR title, for the [skip-bindings-check] opt-out."
+    required: false
+  pr-labels:
+    description: "verify mode: newline- or comma-separated PR labels, for the skip-bindings-check opt-out."
+    required: false
 
 runs:
   using: composite
@@ -28,7 +46,9 @@ runs:
     - uses: actions/setup-node@v4
       with:
         node-version: "22"
-    - shell: bash
+    - name: Sync bindings
+      if: ${{ inputs.mode == 'sync' }}
+      shell: bash
       env:
         NOTION_TOKEN: ${{ inputs.notion-token }}
         MANIFEST: ${{ inputs.manifest }}
@@ -37,3 +57,13 @@ runs:
       # $GITHUB_ACTION_PATH resolves to this action's dir (auto-fetched by GitHub);
       # the script reads the manifest from the caller's checkout (the cwd).
       run: node "$GITHUB_ACTION_PATH/sync-bindings.mjs"
+    - name: Verify bindings (PR gate)
+      if: ${{ inputs.mode == 'verify' }}
+      shell: bash
+      env:
+        MANIFEST: ${{ inputs.manifest }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        PR_TITLE: ${{ inputs.pr-title }}
+        PR_LABELS: ${{ inputs.pr-labels }}
+      run: node "$GITHUB_ACTION_PATH/verify-bindings.mjs"

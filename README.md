@@ -12,8 +12,12 @@ introspection, no LLM.
   access exists) discovers the read/write surface, resolves property names →
   Notion ids, and writes them into the integration repo's `bindings.json`. Ids
   live in the manifest, so CI never touches the target databases.
-- **CI (this action)** — on merge to `main`, reads the manifest and reconciles
-  that build's rows in Synced Properties.
+- **CI — sync (this action, default mode)** — on merge to `main`, reads the
+  manifest and reconciles that build's rows in Synced Properties.
+- **CI — verify (this action, `mode: verify`)** — a PR gate that fails when a PR
+  changes the build's Notion property call-sites but leaves `bindings.json`
+  untouched, so the manifest can't silently drift from the code. No token; reads
+  no Notion. See [Drift gate](#drift-gate-verify-mode).
 
 ## Why one token works for every integration
 
@@ -50,6 +54,52 @@ jobs:
           notion-token: ${{ secrets.NOTION_BINDINGS_TOKEN }}
           # dry-run: "true"   # optional: report the diff without writing
 ```
+
+## Drift gate (verify mode)
+
+`sync` trusts `bindings.json` blindly — it reconciles whatever the manifest says.
+That is only safe if the manifest tracks the code. The **verify** mode is the
+guard: run it as a `pull_request` check (companion to the on-merge sync job). It
+scans the PR's own diff (`base...head`) for Notion call-site tokens — `pages.create`,
+`pages.update`, `dataSources`, `data_source_id`, `database_id`, `properties:`/`=`,
+`.query(` — on added/removed lines. If any fire **and** `bindings.json` is not in
+the same PR, it fails the check.
+
+It is a heuristic, not a parser: false positives are expected and cheap to wave
+through; a silent miss is what we refuse to allow. Behaviour:
+
+- **Self-gating** — does nothing unless `bindings.json` exists (= a registered build).
+- **Manifest in the PR** — passes (you're already on it).
+- **Opt-out** — `[skip-bindings-check]` in the PR title, a `skip-bindings-check`
+  label, or a `"verifyIgnore": ["path/fragment"]` array in the manifest.
+- **No token, no Notion calls.** Needs the PR base/head SHAs and a full checkout
+  (`fetch-depth: 0`) so the `base...head` diff resolves.
+
+Add `.github/workflows/verify-bindings.yml` (this repo dogfoods the same file):
+
+```yaml
+name: Verify property bindings (drift gate)
+on:
+  pull_request:
+jobs:
+  verify-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mf-consulting-notion/notion-bindings-sync@v1
+        with:
+          mode: verify
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          pr-title: ${{ github.event.pull_request.title }}
+          pr-labels: ${{ join(github.event.pull_request.labels.*.name, '\n') }}
+```
+
+The gate needs no secret, so it works on forks and needs no per-repo setup beyond
+this file. When `register-build` scaffolds a caller, it can drop both the sync and
+verify workflows together.
 
 ## One-time setup per caller repo
 
@@ -97,3 +147,12 @@ tool's job (`register-build` phase 2), not CI's.
 ```
 NOTION_TOKEN='ntn_…' DRY_RUN=1 MANIFEST=/abs/path/to/bindings.json node sync-bindings.mjs
 ```
+
+Verify the drift gate locally against a PR range (no token):
+
+```
+BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=$(git rev-parse HEAD) \
+  PR_TITLE="$(git log -1 --format=%s)" node verify-bindings.mjs
+```
+
+Run the unit tests: `node --test`.

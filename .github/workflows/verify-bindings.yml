@@ -1,0 +1,17 @@
+name: Verify property bindings (drift gate)
+on:
+  pull_request:
+jobs:
+  verify-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base commit for the base...head diff
+      - uses: mf-consulting-notion/notion-bindings-sync@v1
+        with:
+          mode: verify
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          pr-title: ${{ github.event.pull_request.title }}
+          pr-labels: ${{ join(github.event.pull_request.labels.*.name, '\n') }}
