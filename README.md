@@ -156,9 +156,26 @@ build or many (discovery + per-build attribution handle the rest).
   `mf-consulting-notion` isn't on — so each repo gets its own copy of the same
   token value instead (stored in 1Password, item "Sync Bindings"). If the org
   ever upgrades, these can be consolidated back into one org secret.
-- **Private action access**: this repo is private, so let other org repos consume
-  its action — *Settings → Actions → General → Access → "Accessible from
-  repositories in the mf-consulting-notion organization"*.
+- **Action access**: none needed. This repo is **public**, so any repo — in this
+  org or a client's — can consume the action (`uses: mf-consulting-notion/notion-bindings-sync@v1`)
+  with no allow-listing. Public visibility is deliberate (see below), so the old
+  *Settings → Actions → Access* org-scoping step no longer applies.
+
+## Public by design
+
+This repo is **public on purpose**, and its contents are meant to be fetched raw and
+unauthenticated:
+
+- The composite action is consumed by arbitrary caller repos, including ones in
+  **other GitHub orgs** (client repos) that can't be granted private-action access.
+- `register-build` scaffolds a caller by pulling the workflow YAML straight from
+  `raw.githubusercontent.com/mf-consulting-notion/notion-bindings-sync/v1/...` — a raw,
+  token-less `curl` at the pinned `@v1` ref. That only works while the repo is public.
+
+Nothing secret lives here: the action reads/writes only MF Notion databases, and the
+only credential (`NOTION_BINDINGS_TOKEN`) is supplied by each **caller** as its own
+repo secret — never committed here. So keep the repo public and keep this content
+safe to serve raw.
 
 ## Versioning
 
