@@ -88,12 +88,16 @@ export function isScannable(file, ignoreSubstrings) {
 /**
  * Per-directory drift attribution. Each changed code file whose diff fires a Notion
  * token is attributed to its nearest-ancestor manifest directory (`ownerManifestDir`).
- * It offends unless THAT manifest is part of the PR (`changedManifestDirs`). Files
- * with no ancestor manifest (owner === null) always offend — undeclared surface.
- * `diffFor(file)` yields the file's unified diff (or null to skip a deleted/renamed).
+ * A file with an owning manifest OFFENDS unless that manifest is part of the PR
+ * (`changedManifestDirs`). A file with NO ancestor manifest (owner === null) is
+ * OUT OF SCOPE — the gate only guards builds that declare a property surface, so
+ * shared infra without a manifest is reported as `unowned` (informational) and never
+ * blocks. `diffFor(file)` yields the file's unified diff (or null to skip a
+ * deleted/renamed file). Returns { offenders, unowned }.
  */
 export function findOffenders({ changedFiles, changedManifestDirs, manifestDirs, ignoreSubstrings, diffFor }) {
   const offenders = [];
+  const unowned = [];
   for (const file of changedFiles) {
     if (!isScannable(file, ignoreSubstrings)) continue;
     const diff = diffFor(file);
@@ -101,15 +105,18 @@ export function findOffenders({ changedFiles, changedManifestDirs, manifestDirs,
     const hits = scanDiffForTokens(diff);
     if (!hits.size) continue;
     const owner = ownerManifestDir(file, manifestDirs);
-    if (owner !== null && changedManifestDirs.has(owner)) continue; // author is on the owning manifest
+    if (owner === null) {
+      unowned.push({ file, tokens: [...hits] }); // no manifest covers it → not our beat
+      continue;
+    }
+    if (changedManifestDirs.has(owner)) continue; // author is on the owning manifest
     offenders.push({ file, tokens: [...hits], owner });
   }
-  return offenders;
+  return { offenders, unowned };
 }
 
-/** Human label for an owning manifest dir: "" -> root manifest, null -> none. */
+/** Human label for an owning manifest dir: "" -> root manifest. */
 function ownerLabel(owner) {
-  if (owner === null) return "(no manifest covers this path)";
   return `${owner}bindings.json`;
 }
 
@@ -191,7 +198,7 @@ function main() {
   // 5. Attribute each drifting code file to its owning manifest; offend unless that
   //    manifest is in the PR. verifyIgnore is the union across all manifests.
   const ignoreSubstrings = readVerifyIgnore(manifestPaths);
-  const offenders = findOffenders({
+  const { offenders, unowned } = findOffenders({
     changedFiles: changed,
     changedManifestDirs,
     manifestDirs,
@@ -204,6 +211,12 @@ function main() {
       }
     },
   });
+
+  // Out-of-scope: Notion code changed in a file no manifest covers. Reported, never
+  // blocking — the gate only guards builds that declare a property surface.
+  for (const u of unowned) {
+    console.log(`bindings-verify: Notion code changed in ${u.file} but no bindings.json covers it — not checked.`);
+  }
 
   if (offenders.length === 0) {
     pass("bindings-verify: no Notion call-site changes without a matching bindings.json update — clean.");

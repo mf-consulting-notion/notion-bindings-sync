@@ -82,7 +82,7 @@ const DRIFT = "@@\n+await notion.pages.update({ page_id, properties: {} });";
 const CLEAN = "@@\n+const label = greet(name);";
 
 test("findOffenders: single root manifest — code drift, manifest not in PR -> offender", () => {
-  const offenders = findOffenders({
+  const { offenders, unowned } = findOffenders({
     changedFiles: ["src/sync.ts"],
     changedManifestDirs: new Set(),
     manifestDirs: [""],
@@ -91,10 +91,11 @@ test("findOffenders: single root manifest — code drift, manifest not in PR -> 
   });
   assert.equal(offenders.length, 1);
   assert.equal(offenders[0].owner, "");
+  assert.deepEqual(unowned, []);
 });
 
 test("findOffenders: root manifest touched -> its files pass", () => {
-  const offenders = findOffenders({
+  const { offenders } = findOffenders({
     changedFiles: ["src/sync.ts"],
     changedManifestDirs: new Set([""]),
     manifestDirs: [""],
@@ -105,7 +106,7 @@ test("findOffenders: root manifest touched -> its files pass", () => {
 });
 
 test("findOffenders: monorepo — drift in service A (manifest absent) but B present -> only A offends", () => {
-  const offenders = findOffenders({
+  const { offenders } = findOffenders({
     changedFiles: ["drive-worker/notion.ts", "contacts-worker/api.ts"],
     changedManifestDirs: new Set(["contacts-worker/"]), // only B's manifest in the PR
     manifestDirs: ["drive-worker/", "contacts-worker/"],
@@ -117,20 +118,21 @@ test("findOffenders: monorepo — drift in service A (manifest absent) but B pre
   assert.equal(offenders[0].owner, "drive-worker/");
 });
 
-test("findOffenders: orphan code (no ancestor manifest) offends with null owner", () => {
-  const offenders = findOffenders({
+test("findOffenders: orphan code (no ancestor manifest) does NOT offend — out of scope, informational", () => {
+  const { offenders, unowned } = findOffenders({
     changedFiles: ["shared/util.ts"],
     changedManifestDirs: new Set(["drive-worker/"]),
     manifestDirs: ["drive-worker/", "contacts-worker/"],
     ignoreSubstrings: [],
     diffFor: () => DRIFT,
   });
-  assert.equal(offenders.length, 1);
-  assert.equal(offenders[0].owner, null);
+  assert.deepEqual(offenders, []); // policy: no manifest = no warning
+  assert.equal(unowned.length, 1);
+  assert.equal(unowned[0].file, "shared/util.ts");
 });
 
-test("findOffenders: clean diffs and ignored files never offend", () => {
-  const offenders = findOffenders({
+test("findOffenders: clean diffs and ignored files neither offend nor report", () => {
+  const { offenders, unowned } = findOffenders({
     changedFiles: ["drive-worker/notion.ts", "README.md", "drive-worker/bindings.json"],
     changedManifestDirs: new Set(),
     manifestDirs: ["drive-worker/"],
@@ -138,10 +140,11 @@ test("findOffenders: clean diffs and ignored files never offend", () => {
     diffFor: () => CLEAN,
   });
   assert.deepEqual(offenders, []);
+  assert.deepEqual(unowned, []);
 });
 
 test("findOffenders: a deleted/renamed file (null diff) is skipped, not blocked", () => {
-  const offenders = findOffenders({
+  const { offenders, unowned } = findOffenders({
     changedFiles: ["drive-worker/gone.ts"],
     changedManifestDirs: new Set(),
     manifestDirs: ["drive-worker/"],
@@ -149,4 +152,5 @@ test("findOffenders: a deleted/renamed file (null diff) is skipped, not blocked"
     diffFor: () => null,
   });
   assert.deepEqual(offenders, []);
+  assert.deepEqual(unowned, []);
 });

@@ -102,13 +102,24 @@ through; a silent miss is what we refuse to allow. Behaviour:
   under a deeper one). It passes only if *that* build's `bindings.json` is in the
   PR — so drift in `drive-worker/` isn't waved through just because
   `contacts-worker/bindings.json` was touched. Single-manifest repos behave exactly
-  as before. A code file with **no** ancestor manifest (undeclared surface) always
-  offends.
+  as before.
+- **Code with no owning manifest is not flagged.** A changed file whose Notion
+  call-sites sit under **no** `bindings.json` (shared infra like `packages/notion/`)
+  is out of the gate's scope — it logs an informational line and passes. The gate
+  guards only builds that declare a property surface; a build always carries a
+  manifest (register-build scaffolds a skeleton early), so property changes land in
+  the build folder, not the generic helper. This is a deliberately accepted
+  silent-miss along the shared-code axis.
 - **Opt-out** — `[skip-bindings-check]` in the PR title, a `skip-bindings-check`
   label, or a `"verifyIgnore": ["path/fragment"]` array in a manifest (unioned across
   all manifests).
 - **No token, no Notion calls.** Needs the PR base/head SHAs and a full checkout
   (`fetch-depth: 0`) so the `base...head` diff resolves.
+
+**Run it as a non-required check.** The gate is a heuristic backstop, not a hard
+wall — leave it off the branch-protection "required checks" list (a repo setting,
+not code) so a false positive never blocks a merge; a human reads it and waves it
+through or re-captures bindings.
 
 Add `.github/workflows/verify-bindings.yml` (this repo dogfoods the same file):
 

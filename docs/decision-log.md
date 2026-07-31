@@ -33,3 +33,21 @@ Engineering calls made during implementation. One line each; rationale terse.
 - **[senior-review r2] Missing explicit override fails, not skips** — verify only
   self-gates in DISCOVERY mode; a non-empty `MANIFEST` override pointing at a missing
   file fails loud (a typo must not silently disable the drift gate), matching sync.
+- **[design follow-up] Orphan code is OUT OF SCOPE, not an offender** — REVERSES the
+  earlier "orphan always offends" call. A changed file with Notion call-sites but no
+  ancestor manifest no longer fails verify: it logs an informational line and passes
+  (exit 0). Policy: "no bindings.json = no warning" — the gate guards only builds
+  that declare a property surface; shared infra without a manifest (e.g. natwill
+  `packages/notion/`) is deliberately not its beat. This is a consciously accepted
+  silent-miss along the shared-code axis, bounded by: (a) register-build (Session B)
+  will scaffold a skeleton `bindings.json` early for every syncing build, so real
+  builds always have a manifest; (b) property changes almost always land in the build
+  folder, not a generic helper; (c) the gate is run NON-REQUIRED (a branch-protection
+  setting, not code) so it's advisory anyway. `findOffenders` now returns
+  `{ offenders, unowned }`.
+- **[framing correction] The glob change is a UNIFORMITY win, not a bug fix** — the
+  multi-manifest discovery does not repair anything broken. A monorepo like natwill
+  already syncs today via an explicit `manifest:`-override job per build. What this
+  buys is uniform scaffolding: register-build can drop ONE standard root workflow pair
+  per caller instead of a hand-maintained N-job file, and the reconcile system fans
+  out to all builds.
