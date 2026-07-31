@@ -5,7 +5,7 @@ jobs:
   verify-bindings:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # need the base commit for the base...head diff
       - uses: mf-consulting-notion/notion-bindings-sync@v1

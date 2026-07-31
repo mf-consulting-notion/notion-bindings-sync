@@ -8,7 +8,7 @@ jobs:
   sync-bindings:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mf-consulting-notion/notion-bindings-sync@v1
         with:
           notion-token: ${{ secrets.NOTION_BINDINGS_TOKEN }}
