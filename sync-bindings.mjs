@@ -15,31 +15,33 @@
  * text). A binding missing its `propertyId` FAILS the run — resolution is the
  * authoring tool's job, not CI's.
  *
- * Env: NOTION_TOKEN (required), SYNCED_PROPERTIES_DS, MANIFEST (default
- * bindings.json), DRY_RUN (1/true = report only). Zero dependencies — plain
- * Node 20+ (global fetch).
+ * Env: NOTION_TOKEN (required in sync), SYNCED_PROPERTIES_DS, MANIFEST (empty =
+ * discover build manifests; a path = one explicit manifest), DRY_RUN (1/true =
+ * report only). Zero dependencies — plain Node 22 (global fetch, fs.globSync).
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { discoverManifests } from "./manifests.mjs";
 
 const NOTION_VERSION = "2025-09-03";
 const BASE = "https://api.notion.com";
 const REQUEST_GAP_MS = 350;
 const SYNCED_PROPERTIES_DS = process.env.SYNCED_PROPERTIES_DS || "7d1aeaec-129e-4dde-9040-5761c86aef54";
-const MANIFEST = process.env.MANIFEST || "bindings.json";
 const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
-const TOKEN = req("NOTION_TOKEN");
-const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
+export const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
 
-async function main() {
-  // Manifest is read from the CALLER repo's checkout (cwd = GITHUB_WORKSPACE).
-  const manifest = JSON.parse(readFileSync(resolve(process.cwd(), MANIFEST), "utf8"));
+/**
+ * Pure: manifest JSON → normalized reconcile input. Throws on structural problems
+ * (missing buildPageId/workspaceNotionId, bad direction, any binding missing a
+ * resolved propertyId — with the full unresolved list). `label` names the manifest
+ * in error messages (defaults to a generic tag).
+ */
+export function parseManifest(manifest, label = "bindings.json") {
   const buildPageId = manifest.buildPageId;
   const workspaceNotionId = manifest.workspaceNotionId;
-  if (!buildPageId) throw new Error(`${MANIFEST}: missing buildPageId`);
-  if (!workspaceNotionId) throw new Error(`${MANIFEST}: missing workspaceNotionId`);
+  if (!buildPageId) throw new Error(`${label}: missing buildPageId`);
+  if (!workspaceNotionId) throw new Error(`${label}: missing workspaceNotionId`);
 
-  // Build the desired set straight from the manifest — no Notion resolution.
   const desired = [];
   const unresolved = [];
   for (const db of manifest.databases ?? []) {
@@ -49,7 +51,7 @@ async function main() {
         continue;
       }
       if (!DIRECTION_LABEL[b.direction]) {
-        throw new Error(`${MANIFEST}: bad direction "${b.direction}" for ${db.id} → ${b.property}`);
+        throw new Error(`${label}: bad direction "${b.direction}" for ${db.id} → ${b.property}`);
       }
       desired.push({
         key: `${db.id}::${b.propertyId}`,
@@ -62,11 +64,18 @@ async function main() {
   }
   if (unresolved.length) {
     throw new Error(
-      `bindings missing a resolved propertyId (run register-build phase 2 to fill ids):\n  ` + unresolved.join("\n  "),
+      `${label}: bindings missing a resolved propertyId (run register-build phase 2 to fill ids):\n  ` +
+        unresolved.join("\n  "),
     );
   }
+  return { buildPageId, workspaceNotionId, desired };
+}
 
-  const existing = await existingRowsForBuild(buildPageId);
+/**
+ * Pure: the network-free reconcile diff. `existing` is a Map keyed by
+ * `${dbId}::${propertyId}` of the build's current Synced Properties rows.
+ */
+export function computeDiff(desired, existing) {
   const desiredByKey = new Map(desired.map((d) => [d.key, d]));
   const toCreate = desired.filter((d) => !existing.has(d.key));
   const toUpdate = desired.filter((d) => {
@@ -75,23 +84,95 @@ async function main() {
   });
   const toPrune = [...existing.values()].filter((e) => !desiredByKey.has(e.key));
   const unchanged = desired.length - toCreate.length - toUpdate.length;
-
-  console.log(
-    `bindings sync (${DRY_RUN ? "DRY RUN" : "apply"}) — build ${buildPageId}\n` +
-      `  create ${toCreate.length} · update ${toUpdate.length} · prune ${toPrune.length} · unchanged ${unchanged}`,
-  );
-  for (const d of toCreate) console.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
-  for (const d of toUpdate) console.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
-  for (const e of toPrune) console.log(`  - ${e.dbId.slice(0, 8)} ${e.propName}`);
-  if (DRY_RUN) return;
-
-  for (const d of toCreate) await createRow(d, buildPageId, workspaceNotionId);
-  for (const d of toUpdate) await updateRow(existing.get(d.key).pageId, d);
-  for (const e of toPrune) await archiveRow(e.pageId);
-  console.log("done.");
+  return { toCreate, toUpdate, toPrune, unchanged };
 }
 
-async function existingRowsForBuild(buildPageId) {
+/**
+ * Reconcile ONE parsed manifest via injected side-effects. Network-free in tests.
+ * deps = { fetchExisting(buildPageId)->Map, createRow(d,build,ws), updateRow(pageId,d),
+ *          archiveRow(pageId), dryRun, log(msg) }. Returns the applied diff.
+ * Prune is structurally build-scoped: `existing` only ever holds this build's rows.
+ */
+export async function reconcileManifest(parsed, deps) {
+  const { buildPageId, workspaceNotionId, desired } = parsed;
+  const existing = await deps.fetchExisting(buildPageId);
+  const diff = computeDiff(desired, existing);
+  const { toCreate, toUpdate, toPrune, unchanged } = diff;
+
+  deps.log(
+    `bindings sync (${deps.dryRun ? "DRY RUN" : "apply"}) — build ${buildPageId}\n` +
+      `  create ${toCreate.length} · update ${toUpdate.length} · prune ${toPrune.length} · unchanged ${unchanged}`,
+  );
+  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
+  for (const d of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
+  for (const e of toPrune) deps.log(`  - ${e.dbId.slice(0, 8)} ${e.propName}`);
+  if (deps.dryRun) return diff;
+
+  for (const d of toCreate) await deps.createRow(d, buildPageId, workspaceNotionId);
+  for (const d of toUpdate) await deps.updateRow(existing.get(d.key).pageId, d);
+  for (const e of toPrune) await deps.archiveRow(e.pageId);
+  return diff;
+}
+
+/**
+ * Drive every discovered manifest. A malformed manifest is RECORDED and the loop
+ * continues (builds are prune-isolated, so a partial apply corrupts nothing and
+ * re-runs idempotently); the caller fails the run non-zero if `failures` is
+ * non-empty. Returns { applied: label[], failures: {manifest,error}[] }.
+ */
+export async function syncAll(manifestPaths, deps) {
+  const applied = [];
+  const failures = [];
+  for (const path of manifestPaths) {
+    const label = deps.labelFor(path);
+    try {
+      const parsed = parseManifest(deps.readManifest(path), label);
+      await reconcileManifest(parsed, deps);
+      applied.push(label);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      failures.push({ manifest: label, error: msg });
+      deps.log(`bindings sync: FAILED ${label} — ${msg}`);
+    }
+  }
+  return { applied, failures };
+}
+
+async function main() {
+  const override = process.env.MANIFEST;
+  // Explicit override → exactly that file (missing = throw, back-compat). Otherwise
+  // discover the build manifests in the caller checkout (cwd = GITHUB_WORKSPACE).
+  const manifestPaths = override ? [resolve(process.cwd(), override)] : discoverManifests(process.cwd());
+  if (manifestPaths.length === 0) {
+    console.log("bindings sync: no bindings.json found in the checkout — nothing to sync.");
+    return;
+  }
+
+  // Only now that there's work to do is the token required.
+  const TOKEN = req("NOTION_TOKEN");
+  const deps = {
+    dryRun: DRY_RUN,
+    log: (m) => console.log(m),
+    labelFor: (p) => p.slice(process.cwd().length + 1) || p,
+    readManifest: (p) => JSON.parse(readFileSync(p, "utf8")),
+    fetchExisting: (buildPageId) => existingRowsForBuild(buildPageId, TOKEN),
+    createRow: (d, build, ws) => createRow(d, build, ws, TOKEN),
+    updateRow: (pageId, d) => updateRow(pageId, d, TOKEN),
+    archiveRow: (pageId) => archiveRow(pageId, TOKEN),
+  };
+
+  const { applied, failures } = await syncAll(manifestPaths, deps);
+  if (failures.length) {
+    console.error(
+      `bindings sync: ${failures.length} of ${manifestPaths.length} manifest(s) failed:\n  ` +
+        failures.map((f) => `${f.manifest}: ${f.error}`).join("\n  "),
+    );
+    process.exit(1);
+  }
+  console.log(`done — ${applied.length} manifest(s) reconciled.`);
+}
+
+async function existingRowsForBuild(buildPageId, TOKEN) {
   const out = new Map();
   let cursor;
   do {
@@ -99,7 +180,7 @@ async function existingRowsForBuild(buildPageId) {
       filter: { property: "Build", relation: { contains: buildPageId } },
       page_size: 100,
       ...(cursor && { start_cursor: cursor }),
-    });
+    }, TOKEN);
     for (const r of res.results) {
       const propertyId = plain(r.properties["Property Notion ID"]?.rich_text);
       const dbId = plain(r.properties["Database Notion ID"]?.rich_text);
@@ -118,7 +199,7 @@ async function existingRowsForBuild(buildPageId) {
   return out;
 }
 
-function createRow(d, buildPageId, workspaceNotionId) {
+function createRow(d, buildPageId, workspaceNotionId, TOKEN) {
   return request("/v1/pages", "POST", {
     parent: { type: "data_source_id", data_source_id: SYNCED_PROPERTIES_DS },
     properties: {
@@ -129,21 +210,21 @@ function createRow(d, buildPageId, workspaceNotionId) {
       Build: { relation: [{ id: buildPageId }] },
       Direction: { select: { name: DIRECTION_LABEL[d.direction] } },
     },
-  });
+  }, TOKEN);
 }
 
-function updateRow(pageId, d) {
+function updateRow(pageId, d, TOKEN) {
   return request(`/v1/pages/${pageId}`, "PATCH", {
     properties: {
       "Property Name": { title: [{ text: { content: d.propName } }] },
       Direction: { select: { name: DIRECTION_LABEL[d.direction] } },
     },
-  });
+  }, TOKEN);
 }
 
 // Archived rows drop out of Yanta's next fetch, so its own prune removes them.
-function archiveRow(pageId) {
-  return request(`/v1/pages/${pageId}`, "PATCH", { archived: true });
+function archiveRow(pageId, TOKEN) {
+  return request(`/v1/pages/${pageId}`, "PATCH", { archived: true }, TOKEN);
 }
 
 function plain(rt) {
@@ -151,7 +232,7 @@ function plain(rt) {
 }
 
 let lastRequestAt = 0;
-async function request(path, method, body) {
+async function request(path, method, body, TOKEN) {
   const wait = Math.max(0, REQUEST_GAP_MS - (Date.now() - lastRequestAt));
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   lastRequestAt = Date.now();
@@ -174,7 +255,10 @@ function req(name) {
   return v;
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+// Only run when executed directly — keeps the exports import-safe for tests.
+if (process.argv[1] && resolve(process.argv[1]).endsWith("sync-bindings.mjs")) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

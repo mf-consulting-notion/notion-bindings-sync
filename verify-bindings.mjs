@@ -27,8 +27,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import { discoverManifests, ownerManifestDir } from "./manifests.mjs";
 
-const MANIFEST = process.env.MANIFEST || "bindings.json";
 const SKIP_MARKER = "[skip-bindings-check]";
 const SKIP_LABEL = "skip-bindings-check";
 
@@ -85,6 +85,34 @@ export function isScannable(file, ignoreSubstrings) {
   return true;
 }
 
+/**
+ * Per-directory drift attribution. Each changed code file whose diff fires a Notion
+ * token is attributed to its nearest-ancestor manifest directory (`ownerManifestDir`).
+ * It offends unless THAT manifest is part of the PR (`changedManifestDirs`). Files
+ * with no ancestor manifest (owner === null) always offend — undeclared surface.
+ * `diffFor(file)` yields the file's unified diff (or null to skip a deleted/renamed).
+ */
+export function findOffenders({ changedFiles, changedManifestDirs, manifestDirs, ignoreSubstrings, diffFor }) {
+  const offenders = [];
+  for (const file of changedFiles) {
+    if (!isScannable(file, ignoreSubstrings)) continue;
+    const diff = diffFor(file);
+    if (!diff) continue;
+    const hits = scanDiffForTokens(diff);
+    if (!hits.size) continue;
+    const owner = ownerManifestDir(file, manifestDirs);
+    if (owner !== null && changedManifestDirs.has(owner)) continue; // author is on the owning manifest
+    offenders.push({ file, tokens: [...hits], owner });
+  }
+  return offenders;
+}
+
+/** Human label for an owning manifest dir: "" -> root manifest, null -> none. */
+function ownerLabel(owner) {
+  if (owner === null) return "(no manifest covers this path)";
+  return `${owner}bindings.json`;
+}
+
 function git(args) {
   return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
@@ -100,10 +128,34 @@ function fail(msg) {
 }
 
 function main() {
-  // 1. Self-gate: not a registered build → nothing to protect.
-  if (!existsSync(resolve(process.cwd(), MANIFEST))) {
-    pass(`bindings-verify: no ${MANIFEST} in this repo — not a registered build, skipping.`);
+  const cwd = process.cwd();
+
+  // Resolve the build manifests. Explicit MANIFEST override → exactly that file; a
+  // missing override is a misconfiguration (a typo would otherwise silently disable
+  // the gate), so it FAILS rather than self-gating. No override → discover every
+  // root/top-level-service bindings.json, and self-gate only when none exist.
+  const override = process.env.MANIFEST;
+  let manifestPaths;
+  if (override) {
+    const abs = resolve(cwd, override);
+    if (!existsSync(abs)) {
+      fail(`bindings-verify: MANIFEST override "${override}" does not exist — cannot judge drift. Fix the path or unset it to auto-discover.`);
+    }
+    manifestPaths = [abs];
+  } else {
+    manifestPaths = discoverManifests(cwd);
+    // 1. Self-gate: no registered build anywhere → nothing to protect.
+    if (manifestPaths.length === 0) {
+      pass("bindings-verify: no bindings.json in this repo — not a registered build, skipping.");
+    }
   }
+
+  // Relative manifest paths + their owning dir prefixes ("" = repo root).
+  const relManifests = manifestPaths.map((p) => p.slice(cwd.length + 1));
+  const manifestDirs = relManifests.map((r) => {
+    const i = r.lastIndexOf("/");
+    return i === -1 ? "" : r.slice(0, i + 1);
+  });
 
   // 2. Opt-out.
   const skip = skipReason(process.env.PR_TITLE, process.env.PR_LABELS);
@@ -129,50 +181,60 @@ function main() {
     );
   }
 
-  // 4. Manifest touched in this PR → author is on it; trust and pass.
-  if (changed.includes(MANIFEST)) {
-    pass(`bindings-verify: ${MANIFEST} is part of this PR — OK.`);
-  }
+  // 4. Which manifests' OWN dirs are part of this PR → author is on those builds.
+  const changedSet = new Set(changed);
+  const changedManifestDirs = new Set();
+  relManifests.forEach((r, i) => {
+    if (changedSet.has(r)) changedManifestDirs.add(manifestDirs[i]);
+  });
 
-  // 5. Scan the changed code files' diffs for Notion call-site tokens.
-  const ignoreSubstrings = readVerifyIgnore();
-  const offenders = [];
-  for (const file of changed) {
-    if (!isScannable(file, ignoreSubstrings)) continue;
-    let diff;
-    try {
-      diff = git(["diff", `${base}...${head}`, "--", file]);
-    } catch {
-      continue; // deleted/renamed edge — don't block on it
-    }
-    const hits = scanDiffForTokens(diff);
-    if (hits.size) offenders.push({ file, tokens: [...hits] });
-  }
+  // 5. Attribute each drifting code file to its owning manifest; offend unless that
+  //    manifest is in the PR. verifyIgnore is the union across all manifests.
+  const ignoreSubstrings = readVerifyIgnore(manifestPaths);
+  const offenders = findOffenders({
+    changedFiles: changed,
+    changedManifestDirs,
+    manifestDirs,
+    ignoreSubstrings,
+    diffFor: (file) => {
+      try {
+        return git(["diff", `${base}...${head}`, "--", file]);
+      } catch {
+        return null; // deleted/renamed edge — don't block on it
+      }
+    },
+  });
 
   if (offenders.length === 0) {
-    pass("bindings-verify: no Notion call-site changes without a bindings.json update — clean.");
+    pass("bindings-verify: no Notion call-site changes without a matching bindings.json update — clean.");
   }
 
   const lines = [
-    `bindings-verify: this PR changes Notion property call-sites but does not touch ${MANIFEST}.`,
+    "bindings-verify: this PR changes Notion property call-sites without updating the owning bindings.json.",
     "The Synced Properties mapping would drift from the code. Offending changes:",
-    ...offenders.map((o) => `  • ${o.file}  [${o.tokens.join(", ")}]`),
+    ...offenders.map((o) => `  • ${o.file}  [${o.tokens.join(", ")}]  → owner: ${ownerLabel(o.owner)}`),
     "",
     "Fix one of:",
-    `  - Re-capture bindings: run register-build phase 2 (\"capture bindings\") and commit the updated ${MANIFEST}.`,
+    "  - Re-capture bindings: run register-build phase 2 (\"capture bindings\") and commit the updated bindings.json",
+    "    for the offending build (a monorepo build owns the manifest in its own top-level folder).",
     `  - If this change does not affect the Notion property surface, opt out: add ${SKIP_MARKER} to the PR title`,
-    `    or the "${SKIP_LABEL}" label, or add a path fragment to "verifyIgnore" in ${MANIFEST}.`,
+    `    or the "${SKIP_LABEL}" label, or add a path fragment to "verifyIgnore" in the owning bindings.json.`,
   ];
   fail(lines.join("\n"));
 }
 
-function readVerifyIgnore() {
-  try {
-    const m = JSON.parse(readFileSync(resolve(process.cwd(), MANIFEST), "utf8"));
-    return Array.isArray(m.verifyIgnore) ? m.verifyIgnore : [];
-  } catch {
-    return [];
+/** Union of every discovered manifest's verifyIgnore path fragments. */
+function readVerifyIgnore(manifestPaths) {
+  const out = [];
+  for (const p of manifestPaths) {
+    try {
+      const m = JSON.parse(readFileSync(p, "utf8"));
+      if (Array.isArray(m.verifyIgnore)) out.push(...m.verifyIgnore);
+    } catch {
+      // unreadable/unparseable manifest → contributes no ignores
+    }
   }
+  return out;
 }
 
 // Only run the gate when executed directly (keeps the exports import-safe for tests).

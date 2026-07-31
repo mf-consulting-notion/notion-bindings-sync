@@ -6,6 +6,11 @@ A GitHub composite action that pushes a repo's declared `bindings.json`
 model (ADR 0007). Deterministic, per-build **upsert + prune** — no code
 introspection, no LLM.
 
+A repo may hold **more than one build**: a monorepo has one `bindings.json` per
+top-level service folder (e.g. `drive-worker/bindings.json` +
+`contacts-worker/bindings.json`). The action discovers and reconciles **all** of
+them, each scoped to its own build — see [Multi-build (monorepo)](#multi-build-monorepo).
+
 ## Division of labour
 
 - **Authoring** — `register-build` phase 2 (run where the integration's target-DB
@@ -42,7 +47,7 @@ name: Sync Notion property bindings
 on:
   push:
     branches: [main]
-    paths: [bindings.json]
+    paths: ['bindings.json', '*/bindings.json']
   workflow_dispatch:
 jobs:
   sync-bindings:
@@ -54,6 +59,28 @@ jobs:
           notion-token: ${{ secrets.NOTION_BINDINGS_TOKEN }}
           # dry-run: "true"   # optional: report the diff without writing
 ```
+
+## Multi-build (monorepo)
+
+One workflow pair covers the whole repo — the reconcile system handles the N builds
+inside, so `register-build` can drop a single sync + verify pair per caller.
+
+- **Discovery** globs `bindings.json` and `*/bindings.json` — the **repo root** and
+  each **top-level service folder**, matching the register-build convention that a
+  build's manifest lives at its build root. This is depth-0 + depth-1 only, *not*
+  recursive: a stray `bindings.json` in a fixture or vendored copy is never swept
+  into the live mapping DB. `node_modules/` and `.git/` are excluded. A build nested
+  deeper (`services/foo/bindings.json`) is out of convention — point at it with the
+  explicit `manifest:` input.
+- **Per-build isolation.** Each manifest reconciles only *its* build's rows
+  (`Build relation contains buildPageId`), so build A's manifest can never create or
+  prune build B's rows. Order doesn't matter; re-runs are idempotent.
+- **Fail-loud, don't fail-fast.** Every manifest is processed; a malformed one
+  (missing `buildPageId`, unresolved `propertyId`, bad direction) is reported and
+  the run still fails non-zero at the end — so one bad manifest can't mask the others
+  and a partial apply is safe to re-run.
+- **Single explicit manifest.** Set `manifest: path/to/bindings.json` to sync/verify
+  exactly one file (skips discovery). Empty (the default) = discover all.
 
 ## Drift gate (verify mode)
 
@@ -68,10 +95,18 @@ the same PR, it fails the check.
 It is a heuristic, not a parser: false positives are expected and cheap to wave
 through; a silent miss is what we refuse to allow. Behaviour:
 
-- **Self-gating** — does nothing unless `bindings.json` exists (= a registered build).
-- **Manifest in the PR** — passes (you're already on it).
+- **Self-gating** — does nothing unless a `bindings.json` exists somewhere (= a
+  registered build).
+- **Per-build attribution (monorepo).** Each offending code file is attributed to
+  its **nearest-ancestor** manifest directory (a root manifest owns everything not
+  under a deeper one). It passes only if *that* build's `bindings.json` is in the
+  PR — so drift in `drive-worker/` isn't waved through just because
+  `contacts-worker/bindings.json` was touched. Single-manifest repos behave exactly
+  as before. A code file with **no** ancestor manifest (undeclared surface) always
+  offends.
 - **Opt-out** — `[skip-bindings-check]` in the PR title, a `skip-bindings-check`
-  label, or a `"verifyIgnore": ["path/fragment"]` array in the manifest.
+  label, or a `"verifyIgnore": ["path/fragment"]` array in a manifest (unioned across
+  all manifests).
 - **No token, no Notion calls.** Needs the PR base/head SHAs and a full checkout
   (`fetch-depth: 0`) so the `base...head` diff resolves.
 
@@ -99,7 +134,8 @@ jobs:
 
 The gate needs no secret, so it works on forks and needs no per-repo setup beyond
 this file. When `register-build` scaffolds a caller, it can drop both the sync and
-verify workflows together.
+verify workflows together — a single pair per caller, whether the repo holds one
+build or many (discovery + per-build attribution handle the rest).
 
 ## One-time setup per caller repo
 
@@ -144,8 +180,15 @@ tool's job (`register-build` phase 2), not CI's.
 
 ## Local dry-run
 
+`MANIFEST` set = that one file; `MANIFEST` unset = discover all build manifests under
+the cwd (root + top-level service folders), same as CI.
+
 ```
+# one explicit manifest
 NOTION_TOKEN='ntn_…' DRY_RUN=1 MANIFEST=/abs/path/to/bindings.json node sync-bindings.mjs
+
+# discover every build manifest in this checkout
+cd /path/to/caller-repo && NOTION_TOKEN='ntn_…' DRY_RUN=1 node /path/to/sync-bindings.mjs
 ```
 
 Verify the drift gate locally against a PR range (no token):
