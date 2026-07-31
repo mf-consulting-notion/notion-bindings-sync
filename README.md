@@ -6,6 +6,11 @@ A GitHub composite action that pushes a repo's declared `bindings.json`
 model (ADR 0007). Deterministic, per-build **upsert + prune** — no code
 introspection, no LLM.
 
+A repo may hold **more than one build**: a monorepo has one `bindings.json` per
+top-level service folder (e.g. `drive-worker/bindings.json` +
+`contacts-worker/bindings.json`). The action discovers and reconciles **all** of
+them, each scoped to its own build — see [Multi-build (monorepo)](#multi-build-monorepo).
+
 ## Division of labour
 
 - **Authoring** — `register-build` phase 2 (run where the integration's target-DB
@@ -42,7 +47,7 @@ name: Sync Notion property bindings
 on:
   push:
     branches: [main]
-    paths: [bindings.json]
+    paths: ['bindings.json', '*/bindings.json']
   workflow_dispatch:
 jobs:
   sync-bindings:
@@ -54,6 +59,28 @@ jobs:
           notion-token: ${{ secrets.NOTION_BINDINGS_TOKEN }}
           # dry-run: "true"   # optional: report the diff without writing
 ```
+
+## Multi-build (monorepo)
+
+One workflow pair covers the whole repo — the reconcile system handles the N builds
+inside, so `register-build` can drop a single sync + verify pair per caller.
+
+- **Discovery** globs `bindings.json` and `*/bindings.json` — the **repo root** and
+  each **top-level service folder**, matching the register-build convention that a
+  build's manifest lives at its build root. This is depth-0 + depth-1 only, *not*
+  recursive: a stray `bindings.json` in a fixture or vendored copy is never swept
+  into the live mapping DB. `node_modules/` and `.git/` are excluded. A build nested
+  deeper (`services/foo/bindings.json`) is out of convention — point at it with the
+  explicit `manifest:` input.
+- **Per-build isolation.** Each manifest reconciles only *its* build's rows
+  (`Build relation contains buildPageId`), so build A's manifest can never create or
+  prune build B's rows. Order doesn't matter; re-runs are idempotent.
+- **Fail-loud, don't fail-fast.** Every manifest is processed; a malformed one
+  (missing `buildPageId`, unresolved `propertyId`, bad direction) is reported and
+  the run still fails non-zero at the end — so one bad manifest can't mask the others
+  and a partial apply is safe to re-run.
+- **Single explicit manifest.** Set `manifest: path/to/bindings.json` to sync/verify
+  exactly one file (skips discovery). Empty (the default) = discover all.
 
 ## Drift gate (verify mode)
 
@@ -68,12 +95,31 @@ the same PR, it fails the check.
 It is a heuristic, not a parser: false positives are expected and cheap to wave
 through; a silent miss is what we refuse to allow. Behaviour:
 
-- **Self-gating** — does nothing unless `bindings.json` exists (= a registered build).
-- **Manifest in the PR** — passes (you're already on it).
+- **Self-gating** — does nothing unless a `bindings.json` exists somewhere (= a
+  registered build).
+- **Per-build attribution (monorepo).** Each offending code file is attributed to
+  its **nearest-ancestor** manifest directory (a root manifest owns everything not
+  under a deeper one). It passes only if *that* build's `bindings.json` is in the
+  PR — so drift in `drive-worker/` isn't waved through just because
+  `contacts-worker/bindings.json` was touched. Single-manifest repos behave exactly
+  as before.
+- **Code with no owning manifest is not flagged.** A changed file whose Notion
+  call-sites sit under **no** `bindings.json` (shared infra like `packages/notion/`)
+  is out of the gate's scope — it logs an informational line and passes. The gate
+  guards only builds that declare a property surface; a build always carries a
+  manifest (register-build scaffolds a skeleton early), so property changes land in
+  the build folder, not the generic helper. This is a deliberately accepted
+  silent-miss along the shared-code axis.
 - **Opt-out** — `[skip-bindings-check]` in the PR title, a `skip-bindings-check`
-  label, or a `"verifyIgnore": ["path/fragment"]` array in the manifest.
+  label, or a `"verifyIgnore": ["path/fragment"]` array in a manifest (unioned across
+  all manifests).
 - **No token, no Notion calls.** Needs the PR base/head SHAs and a full checkout
   (`fetch-depth: 0`) so the `base...head` diff resolves.
+
+**Run it as a non-required check.** The gate is a heuristic backstop, not a hard
+wall — leave it off the branch-protection "required checks" list (a repo setting,
+not code) so a false positive never blocks a merge; a human reads it and waves it
+through or re-captures bindings.
 
 Add `.github/workflows/verify-bindings.yml` (this repo dogfoods the same file):
 
@@ -99,7 +145,8 @@ jobs:
 
 The gate needs no secret, so it works on forks and needs no per-repo setup beyond
 this file. When `register-build` scaffolds a caller, it can drop both the sync and
-verify workflows together.
+verify workflows together — a single pair per caller, whether the repo holds one
+build or many (discovery + per-build attribution handle the rest).
 
 ## One-time setup per caller repo
 
@@ -109,9 +156,26 @@ verify workflows together.
   `mf-consulting-notion` isn't on — so each repo gets its own copy of the same
   token value instead (stored in 1Password, item "Sync Bindings"). If the org
   ever upgrades, these can be consolidated back into one org secret.
-- **Private action access**: this repo is private, so let other org repos consume
-  its action — *Settings → Actions → General → Access → "Accessible from
-  repositories in the mf-consulting-notion organization"*.
+- **Action access**: none needed. This repo is **public**, so any repo — in this
+  org or a client's — can consume the action (`uses: mf-consulting-notion/notion-bindings-sync@v1`)
+  with no allow-listing. Public visibility is deliberate (see below), so the old
+  *Settings → Actions → Access* org-scoping step no longer applies.
+
+## Public by design
+
+This repo is **public on purpose**, and its contents are meant to be fetched raw and
+unauthenticated:
+
+- The composite action is consumed by arbitrary caller repos, including ones in
+  **other GitHub orgs** (client repos) that can't be granted private-action access.
+- `register-build` scaffolds a caller by pulling the workflow YAML straight from
+  `raw.githubusercontent.com/mf-consulting-notion/notion-bindings-sync/v1/...` — a raw,
+  token-less `curl` at the pinned `@v1` ref. That only works while the repo is public.
+
+Nothing secret lives here: the action reads/writes only MF Notion databases, and the
+only credential (`NOTION_BINDINGS_TOKEN`) is supplied by each **caller** as its own
+repo secret — never committed here. So keep the repo public and keep this content
+safe to serve raw.
 
 ## Versioning
 
@@ -144,8 +208,15 @@ tool's job (`register-build` phase 2), not CI's.
 
 ## Local dry-run
 
+`MANIFEST` set = that one file; `MANIFEST` unset = discover all build manifests under
+the cwd (root + top-level service folders), same as CI.
+
 ```
+# one explicit manifest
 NOTION_TOKEN='ntn_…' DRY_RUN=1 MANIFEST=/abs/path/to/bindings.json node sync-bindings.mjs
+
+# discover every build manifest in this checkout
+cd /path/to/caller-repo && NOTION_TOKEN='ntn_…' DRY_RUN=1 node /path/to/sync-bindings.mjs
 ```
 
 Verify the drift gate locally against a PR range (no token):

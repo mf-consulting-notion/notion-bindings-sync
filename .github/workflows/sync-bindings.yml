@@ -2,7 +2,7 @@ name: Sync Notion property bindings
 on:
   push:
     branches: [main]
-    paths: [bindings.json]
+    paths: ['bindings.json', '*/bindings.json']
   workflow_dispatch:
 jobs:
   sync-bindings:

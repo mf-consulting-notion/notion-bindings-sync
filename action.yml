@@ -16,9 +16,12 @@ inputs:
     description: "sync mode: Notion token with WRITE on Synced Properties + READ on Builds. One MF-scoped token serves every integration."
     required: false
   manifest:
-    description: Path to the bindings manifest in the caller repo.
+    description: >-
+      Bindings manifest path. Empty (default) = discover every build manifest in the
+      checkout (repo-root + top-level-service-folder bindings.json). A path = sync/verify
+      exactly that one file (monorepo escape hatch / local dry-run).
     required: false
-    default: bindings.json
+    default: ""
   synced-properties-ds:
     description: Data-source id of the Synced Properties DB (override only if it moves).
     required: false
