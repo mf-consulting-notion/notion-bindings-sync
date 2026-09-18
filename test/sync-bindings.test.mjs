@@ -63,7 +63,7 @@ test("parseManifest: empty databases yields no desired rows", () => {
 // ---- computeDiff ---------------------------------------------------------
 
 const D = (over = {}) => ({ key: "db1::P1", propName: "Status", propertyId: "P1", dbId: "db1", direction: "both", ...over });
-const E = (over = {}) => ({ key: "db1::P1", pageId: "pg1", propName: "Status", dbId: "db1", direction: "Both", ...over });
+const E = (over = {}) => ({ key: "db1::P1", pageId: "pg1", propName: "Status", dbId: "db1", direction: "Both", validationStatus: "Validated", ...over });
 
 test("computeDiff: new desired row -> create", () => {
   const diff = computeDiff([D()], new Map());
@@ -93,6 +93,20 @@ test("computeDiff: existing row absent from desired -> prune", () => {
   const diff = computeDiff([], new Map([["db1::P1", E()]]));
   assert.equal(diff.toPrune.length, 1);
   assert.equal(diff.toPrune[0].pageId, "pg1");
+});
+
+test("computeDiff: empty validation status self-heals to update (pre-migration rows)", () => {
+  const diff = computeDiff([D()], new Map([["db1::P1", E({ validationStatus: "" })]]));
+  assert.equal(diff.toUpdate.length, 1);
+  assert.equal(diff.unchanged, 0);
+});
+
+test("computeDiff: any non-empty validation status is respected on unchanged bindings", () => {
+  for (const status of ["Validated", "Delta-validated", "Pending validation", "Stale", "Unresolved"]) {
+    const diff = computeDiff([D()], new Map([["db1::P1", E({ validationStatus: status })]]));
+    assert.equal(diff.toUpdate.length, 0, status);
+    assert.equal(diff.unchanged, 1, status);
+  }
 });
 
 // ---- reconcileManifest / syncAll (injected deps, network-free) ------------
