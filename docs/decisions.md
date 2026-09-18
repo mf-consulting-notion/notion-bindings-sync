@@ -23,3 +23,24 @@ GitHub's `*` does not cross `/`).
 
 If you ever need true recursion, that's a contract change — reconsider the
 register-build build-root convention first, not just this glob.
+
+## The sync only invalidates — it never validates
+
+Since the Synced Properties DB grew validation properties (`Validation status`,
+`Last validated at`, `Validation source`), this action writes exactly one of them:
+`Validation status` → `Pending validation`, on **create** and on any **update**
+(a changed declaration voids prior validation, so updates also clear the two
+validator-owned fields).
+
+**Why:** the action is deliberately resolution-free — one MF-scoped token, no read
+access to target databases — so it *cannot* verify a binding against reality.
+Validation (setting `Validated`/`Stale`/`Unresolved`, `Last validated at`,
+`Validation source`) is owned by the validator: the Notion Make Agent with Yanta
+MCP access. One validator for all rows, regardless of whether the declaration came
+from this CI or from the agent itself.
+
+**Self-healing backfill:** rows created before the migration have an empty status;
+`computeDiff` treats empty `validationStatus` as `toUpdate`, so old rows converge
+to `Pending validation` on their build's next regular sync run — no manual
+backfill. Any *non-empty* status is respected and left untouched on unchanged
+bindings.

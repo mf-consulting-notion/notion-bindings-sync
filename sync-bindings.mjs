@@ -29,6 +29,11 @@ const REQUEST_GAP_MS = 350;
 const SYNCED_PROPERTIES_DS = process.env.SYNCED_PROPERTIES_DS || "7d1aeaec-129e-4dde-9040-5761c86aef54";
 const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
 export const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
+// Validation ownership: this CI only DECLARES bindings and therefore only ever
+// invalidates — new/changed rows get status "Pending validation" and cleared
+// validator fields. Setting "Validated"/"Stale"/"Unresolved", "Last validated at"
+// and "Validation source" is the validator's job (Make Agent with Yanta MCP).
+export const PENDING_STATUS = "Pending validation";
 
 /**
  * Pure: manifest JSON → normalized reconcile input. Throws on structural problems
@@ -80,7 +85,9 @@ export function computeDiff(desired, existing) {
   const toCreate = desired.filter((d) => !existing.has(d.key));
   const toUpdate = desired.filter((d) => {
     const e = existing.get(d.key);
-    return e && (e.direction !== DIRECTION_LABEL[d.direction] || e.propName !== d.propName);
+    // Empty validationStatus self-heals rows created before the validation
+    // properties existed (converges on the next regular run, no manual backfill).
+    return e && (e.direction !== DIRECTION_LABEL[d.direction] || e.propName !== d.propName || !e.validationStatus);
   });
   const toPrune = [...existing.values()].filter((e) => !desiredByKey.has(e.key));
   const unchanged = desired.length - toCreate.length - toUpdate.length;
@@ -192,6 +199,7 @@ async function existingRowsForBuild(buildPageId, TOKEN) {
         propName: plain(r.properties["Property Name"]?.title),
         dbId,
         direction: r.properties["Direction"]?.select?.name ?? "",
+        validationStatus: r.properties["Validation status"]?.select?.name ?? "",
       });
     }
     cursor = res.has_more && res.next_cursor ? res.next_cursor : undefined;
@@ -209,6 +217,7 @@ function createRow(d, buildPageId, workspaceNotionId, TOKEN) {
       "Workspace Notion ID": { rich_text: [{ text: { content: workspaceNotionId } }] },
       Build: { relation: [{ id: buildPageId }] },
       Direction: { select: { name: DIRECTION_LABEL[d.direction] } },
+      "Validation status": { select: { name: PENDING_STATUS } },
     },
   }, TOKEN);
 }
@@ -218,6 +227,11 @@ function updateRow(pageId, d, TOKEN) {
     properties: {
       "Property Name": { title: [{ text: { content: d.propName } }] },
       Direction: { select: { name: DIRECTION_LABEL[d.direction] } },
+      // A changed declaration voids any prior validation — reset to pending and
+      // clear the validator-owned fields.
+      "Validation status": { select: { name: PENDING_STATUS } },
+      "Last validated at": { date: null },
+      "Validation source": { select: null },
     },
   }, TOKEN);
 }
