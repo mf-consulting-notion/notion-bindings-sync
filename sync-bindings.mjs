@@ -68,8 +68,32 @@ function bindingIdentity(b, label, where) {
 }
 
 /**
+ * Pure: a database entry's optional `via` provenance marker, or undefined.
+ *
+ * Most bindings are evidenced by a call site in the repo — `register-build` phase 2
+ * finds them by grepping for Notion API calls. A build that reads a database through
+ * an AGGREGATING endpoint has no such call site: the properties it depends on are
+ * materialized server-side and never appear in its code, so a grep concludes "this
+ * build syncs nothing" while the coupling is real and invisible. `via` records how
+ * the dependency arises, so a hand-authored binding reads as a deliberate API
+ * declaration rather than as parsing code someone forgot to write.
+ *
+ * Declaration only: it is NOT written to Synced Properties. The property rows it
+ * annotates already produce the Yanta edge; `via` exists for whoever next authors
+ * or re-captures this manifest. Putting it on the wire would mean a schema change
+ * on a shared DB plus a Yanta harvest change for information no consumer reads yet.
+ */
+function parseVia(db, label) {
+  if (db.via === undefined) return undefined;
+  if (typeof db.via !== "string" || !db.via.trim()) {
+    throw new Error(`${label}: "via" for ${db.name ?? db.id} must be a non-empty string (e.g. "api:/v1/ai/plugins")`);
+  }
+  return db.via.trim();
+}
+
+/**
  * Pure: manifest JSON → normalized reconcile input. Throws on structural problems
- * (missing buildPageId/workspaceNotionId, bad direction or target, a duplicate
+ * (missing buildPageId/workspaceNotionId, bad direction, target or via, a duplicate
  * binding, any binding missing a resolved propertyId — with the full unresolved
  * list). `label` names the manifest in error messages (defaults to a generic tag).
  */
@@ -83,6 +107,7 @@ export function parseManifest(manifest, label = "bindings.json") {
   const unresolved = [];
   const seen = new Set();
   for (const db of manifest.databases ?? []) {
+    const via = parseVia(db, label);
     for (const b of db.bindings ?? []) {
       const where = `${db.name ?? db.id} → ${b.target !== undefined ? b.target : `"${b.property}"`}`;
       const identity = bindingIdentity(b, label, where);
@@ -105,6 +130,9 @@ export function parseManifest(manifest, label = "bindings.json") {
         propertyId: identity.propertyId,
         dbId: db.id,
         direction: b.direction,
+        // Declaration-only (never written to Notion); omitted entirely when unset
+        // so the reconcile row shape is unchanged for the overwhelming majority.
+        ...(via !== undefined && { via }),
       });
     }
   }
@@ -151,8 +179,8 @@ export async function reconcileManifest(parsed, deps) {
     `bindings sync (${deps.dryRun ? "DRY RUN" : "apply"}) — build ${buildPageId}\n` +
       `  create ${toCreate.length} · update ${toUpdate.length} · prune ${toPrune.length} · unchanged ${unchanged}`,
   );
-  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
-  for (const d of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
+  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
+  for (const d of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
   for (const e of toPrune) deps.log(`  - ${e.dbId.slice(0, 8)} ${e.propName}`);
   if (deps.dryRun) return diff;
 
@@ -160,6 +188,11 @@ export async function reconcileManifest(parsed, deps) {
   for (const d of toUpdate) await deps.updateRow(existing.get(d.key).pageId, d);
   for (const e of toPrune) await deps.archiveRow(e.pageId);
   return diff;
+}
+
+/** CI-log suffix naming a binding's non-code provenance, or "" for the normal case. */
+function viaNote(d) {
+  return d.via ? ` (via ${d.via})` : "";
 }
 
 /**

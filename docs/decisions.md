@@ -82,3 +82,30 @@ ships, such rows render as an unresolved property there.
 `${dbId}::${propertyId}`. `computeDiff` never deduplicated `desired`, so a twice-declared
 binding created the row twice. Rare for named properties, easy to hit with the
 nameless body target (same DB listed in two database entries).
+
+
+## `via` marks API-mediated bindings, in the manifest only
+
+A database entry may carry `"via": "api:/v1/ai/plugins"`, recording that its
+bindings are evidenced by an API contract rather than by a call site in the repo.
+It is parsed, validated, echoed in the CI log — and never written to Notion.
+
+**Why it is needed:** phase-2 discovery greps for Notion call sites. A build that
+reads a database through an aggregating endpoint has none, so the convention reads
+it as "not a syncing build" while it in fact depends on several properties. Those
+bindings therefore get authored by hand, and without a marker the next author
+cannot tell a deliberate API declaration from parsing code someone forgot to write
+— and might "fix" it by deleting rows phase 2 cannot re-find.
+
+**Why not a column in Synced Properties:** the rows it annotates are ordinary
+property rows and already produce the Yanta edge — the dependency is visible
+either way. Only the *provenance* is new, and its audience is the manifest's next
+author, not the Notion editor. Putting it on the wire would cost a schema change
+on a shared DB plus a Yanta harvest change for something no consumer reads yet.
+Revisit if Yanta ever wants to distinguish the two evidence kinds visually.
+
+**Accepted gap:** the drift gate still cannot protect these bindings. It greps for
+call-site tokens and an API-mediated build has none to change, so a `via` database's
+bindings can go stale with nothing failing a PR. Making phase 2 resolve what an
+aggregating endpoint materializes is the real fix, and it belongs in `register-build`,
+not here.

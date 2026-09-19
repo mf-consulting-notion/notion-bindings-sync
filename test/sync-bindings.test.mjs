@@ -175,6 +175,68 @@ test("computeDiff: a body row diffs and prunes like any other row", () => {
   assert.deepEqual(computeDiff([], existing).toPrune.map((e) => e.pageId), ["p1"]);
 });
 
+// --- via: provenance for API-mediated dependencies ---------------------------
+// Declaration-only: parsed, validated and logged, never written to Notion.
+
+const viaManifest = (via) => ({
+  buildPageId: "build-A",
+  workspaceNotionId: "ws-1",
+  databases: [{ id: "db1", name: "Skills", ...(via !== undefined && { via }), bindings: [
+    { property: "Name", propertyId: "title", direction: "read" },
+  ] }],
+});
+
+test("parseManifest: via rides along on every binding of its database", () => {
+  const { desired } = parseManifest(viaManifest("api:/v1/ai/plugins"));
+  assert.equal(desired[0].via, "api:/v1/ai/plugins");
+});
+
+test("parseManifest: via is absent (not undefined-valued) when unset", () => {
+  assert.ok(!("via" in parseManifest(viaManifest(undefined)).desired[0]));
+});
+
+test("parseManifest: via is trimmed", () => {
+  assert.equal(parseManifest(viaManifest("  api:/v1/ai/plugins  ")).desired[0].via, "api:/v1/ai/plugins");
+});
+
+test("parseManifest: a non-string or blank via throws", () => {
+  for (const bad of ["", "   ", 42, true, {}, []]) {
+    assert.throws(() => parseManifest(viaManifest(bad)), /via/, `expected throw for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("parseManifest: via is per database, not global", () => {
+  const m = {
+    buildPageId: "build-A",
+    workspaceNotionId: "ws-1",
+    databases: [
+      { id: "db1", via: "api:/v1/ai/plugins", bindings: [{ property: "Name", propertyId: "title", direction: "read" }] },
+      { id: "db2", bindings: [{ property: "Status", propertyId: "PID1", direction: "both" }] },
+    ],
+  };
+  const { desired } = parseManifest(m);
+  assert.equal(desired[0].via, "api:/v1/ai/plugins");
+  assert.ok(!("via" in desired[1]));
+});
+
+test("via: never reaches Notion, but is named in the CI log", async () => {
+  const logs = [];
+  const parsed = parseManifest(viaManifest("api:/v1/ai/plugins"));
+  const created = [];
+  await reconcileManifest(parsed, {
+    dryRun: false,
+    log: (m) => logs.push(m),
+    fetchExisting: async () => new Map(),
+    createRow: async (d) => created.push(d),
+    updateRow: async () => {},
+    archiveRow: async () => {},
+  });
+  assert.ok(logs.join("\n").includes("(via api:/v1/ai/plugins)"), "log should name the provenance");
+  // createRow builds the Notion payload from propName/propertyId/dbId/direction only;
+  // `via` is carried for the log and for the next author, never written.
+  assert.equal(created.length, 1);
+});
+
 test("computeDiff: new desired row -> create", () => {
   const diff = computeDiff([D()], new Map());
   assert.equal(diff.toCreate.length, 1);

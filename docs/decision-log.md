@@ -65,3 +65,14 @@ Engineering calls made during implementation. One line each; rationale terse.
   `notion-to-md`/`NotionToMarkdown`/`n2m`, so a body binding has a drift gate at all.
   Bare `children:` deliberately excluded: JSX fires it everywhere and a noisy gate
   gets ignored, which is worse than a known blind spot.
+
+- **`via` on the DATABASE entry, manifest-only** — validated non-empty string,
+  carried onto that DB's desired rows, echoed in the CI log, never written to
+  Notion. The annotated rows are ordinary property rows and already produce the
+  Yanta edge; only provenance is new and its audience is the next author. A Synced
+  Properties column would mean a shared-DB schema change + Yanta harvest change for
+  data no consumer reads. Omitted from the row object entirely when unset (keeps the
+  reconcile shape unchanged).
+- **Drift gate deliberately still blind to `via` bindings** — no call sites to grep;
+  the real fix (phase 2 resolving what an aggregating endpoint materializes) belongs
+  in register-build.

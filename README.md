@@ -213,6 +213,45 @@ for orientation only:
 A property binding without a `propertyId` fails the run — resolution is the
 authoring tool's job (`register-build` phase 2), not CI's.
 
+### API-mediated dependencies (`via`)
+
+`register-build` phase 2 finds bindings by grepping the repo for Notion call
+sites. A build that reads a database through an **aggregating endpoint** has none:
+the properties it depends on are materialized server-side and never appear in its
+code, so a grep concludes "this build syncs nothing" while the coupling is real —
+and invisible from inside Notion, which is exactly where the binding layer is
+supposed to help. (Live case: a build whose only Notion endpoint is
+`/v1/ai/plugins` but which depends on four properties of the source DB; renaming
+one rewrites a published directory tree.)
+
+Such bindings are authored by hand, with `via` on the **database** entry recording
+how the dependency arises:
+
+```json
+{
+  "id": "<data_source_id>",
+  "name": "Skills",
+  "via": "api:/v1/ai/plugins",
+  "bindings": [
+    { "property": "Name", "propertyId": "title", "direction": "read" }
+  ]
+}
+```
+
+- **Declaration only — `via` is not written to Synced Properties.** The property
+  rows it annotates already produce the Yanta edge; `via` is for whoever next
+  authors or re-captures this manifest, so hand-written bindings read as a
+  deliberate API declaration rather than as parsing code someone forgot to write.
+  The sync names it in the CI log (`+ 1a2b3c4d Name [read] (via api:/v1/ai/plugins)`).
+- **Per database**, because the endpoint is a property of how the database is
+  accessed, not of an individual property.
+- The **ids-pre-resolved rule is unchanged** — these property ids resolve normally
+  from the data-source schema, so CI behaves exactly as for any other binding.
+- **The drift gate cannot see these.** It greps for Notion call-site tokens, and
+  an API-mediated build has none to change — a `via` database's bindings are
+  maintained by hand, and nothing will fail a PR when they go stale. Free-text
+  values are fine; `api:<endpoint>` is the convention.
+
 ### Binding a page body
 
 A page's **body** (its block content) is often the strongest coupling a build has
