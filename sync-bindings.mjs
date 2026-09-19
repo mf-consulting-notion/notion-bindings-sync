@@ -35,11 +35,43 @@ export const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
 // and "Validation source" is the validator's job (Make Agent with Yanta MCP).
 export const PENDING_STATUS = "Pending validation";
 
+// A page's BODY (its block content) is a real dependency but has no Notion
+// property id, so it cannot be named the way every other binding is. It rides on
+// a reserved sentinel id instead: `${dbId}::page_body` keys, diffs and prunes
+// exactly like a property row, so reconcile/prune/validation learn nothing new.
+// Grain is per DATABASE ("this build touches row bodies in this DB"), never per
+// page — bindings are declared per database, so that is the only honest grain.
+export const BODY_TARGET = "body";
+export const BODY_PROPERTY_ID = "page_body";
+export const BODY_PROPERTY_NAME = "Page body";
+
+/**
+ * Pure: one binding entry → its Synced Properties identity ({propName, propertyId}),
+ * or null when the id is not resolved yet (the caller aggregates those).
+ *
+ * A `target` binding names something with no property id of its own — currently
+ * only the page body. A binding that hand-writes the sentinel id instead is
+ * normalized onto the SAME identity, so the two spellings can never produce two
+ * rows for one dependency. An unknown target throws rather than no-opping: a
+ * future target must fail loud on an action that predates it, not vanish.
+ */
+function bindingIdentity(b, label, where) {
+  if (b.target !== undefined) {
+    if (b.target !== BODY_TARGET) {
+      throw new Error(`${label}: unknown binding target "${b.target}" for ${where} (the only target is "${BODY_TARGET}")`);
+    }
+    return { propName: BODY_PROPERTY_NAME, propertyId: BODY_PROPERTY_ID };
+  }
+  if (b.propertyId === BODY_PROPERTY_ID) return { propName: BODY_PROPERTY_NAME, propertyId: BODY_PROPERTY_ID };
+  if (!b.propertyId) return null;
+  return { propName: b.property, propertyId: b.propertyId };
+}
+
 /**
  * Pure: manifest JSON → normalized reconcile input. Throws on structural problems
- * (missing buildPageId/workspaceNotionId, bad direction, any binding missing a
- * resolved propertyId — with the full unresolved list). `label` names the manifest
- * in error messages (defaults to a generic tag).
+ * (missing buildPageId/workspaceNotionId, bad direction or target, a duplicate
+ * binding, any binding missing a resolved propertyId — with the full unresolved
+ * list). `label` names the manifest in error messages (defaults to a generic tag).
  */
 export function parseManifest(manifest, label = "bindings.json") {
   const buildPageId = manifest.buildPageId;
@@ -49,19 +81,28 @@ export function parseManifest(manifest, label = "bindings.json") {
 
   const desired = [];
   const unresolved = [];
+  const seen = new Set();
   for (const db of manifest.databases ?? []) {
     for (const b of db.bindings ?? []) {
-      if (!b.propertyId) {
+      const where = `${db.name ?? db.id} → ${b.target !== undefined ? b.target : `"${b.property}"`}`;
+      const identity = bindingIdentity(b, label, where);
+      if (!identity) {
         unresolved.push(`${db.name ?? db.id} → "${b.property}"`);
         continue;
       }
       if (!DIRECTION_LABEL[b.direction]) {
-        throw new Error(`${label}: bad direction "${b.direction}" for ${db.id} → ${b.property}`);
+        throw new Error(`${label}: bad direction "${b.direction}" for ${db.id} → ${identity.propName}`);
       }
+      // computeDiff keys rows but does not deduplicate `desired`: a key declared
+      // twice would create the row twice. Rare for named properties, easy to hit
+      // with the nameless body target (same DB listed twice) — so fail loud.
+      const key = `${db.id}::${identity.propertyId}`;
+      if (seen.has(key)) throw new Error(`${label}: duplicate binding ${where} — ${key} is declared twice`);
+      seen.add(key);
       desired.push({
-        key: `${db.id}::${b.propertyId}`,
-        propName: b.property,
-        propertyId: b.propertyId,
+        key,
+        propName: identity.propName,
+        propertyId: identity.propertyId,
         dbId: db.id,
         direction: b.direction,
       });

@@ -87,10 +87,16 @@ inside, so `register-build` can drop a single sync + verify pair per caller.
 `sync` trusts `bindings.json` blindly — it reconciles whatever the manifest says.
 That is only safe if the manifest tracks the code. The **verify** mode is the
 guard: run it as a `pull_request` check (companion to the on-merge sync job). It
-scans the PR's own diff (`base...head`) for Notion call-site tokens — `pages.create`,
+scans the PR's own diff (`base...head`) for Notion call-site tokens on
+added/removed lines. Two families: **property** call-sites (`pages.create`,
 `pages.update`, `dataSources`, `data_source_id`, `database_id`, `properties:`/`=`,
-`.query(` — on added/removed lines. If any fire **and** `bindings.json` is not in
-the same PR, it fails the check.
+`.query(`) and — since a manifest can bind a page body — **content** call-sites
+(`blocks.children`, `block_id`, `notion-to-md`/`NotionToMarkdown`/`n2m`). If any
+fire **and** `bindings.json` is not in the same PR, it fails the check.
+
+`children:` on its own is deliberately *not* a token — JSX would fire it on half
+the files in a React repo, and a gate nobody reads is worse than a gate with a
+known blind spot.
 
 It is a heuristic, not a parser: false positives are expected and cheap to wave
 through; a silent miss is what we refuse to allow. Behaviour:
@@ -197,14 +203,42 @@ for orientation only:
   "workspaceNotionId": "<target workspace's Notion id>",
   "databases": [
     { "id": "<data_source_id>", "name": "Human label", "bindings": [
-      { "property": "Status", "propertyId": "XIvk", "direction": "both" }
+      { "property": "Status", "propertyId": "XIvk", "direction": "both" },
+      { "target": "body", "direction": "read" }
     ] }
   ]
 }
 ```
 
-A binding without a `propertyId` fails the run — resolution is the authoring
-tool's job (`register-build` phase 2), not CI's.
+A property binding without a `propertyId` fails the run — resolution is the
+authoring tool's job (`register-build` phase 2), not CI's.
+
+### Binding a page body
+
+A page's **body** (its block content) is often the strongest coupling a build has
+— a build that publishes page content as a file depends on the body far more than
+on the metadata around it — but a body has no Notion property id, so it cannot be
+named the way a property is. Declare it with a reserved **target** instead:
+
+```json
+{ "target": "body", "direction": "read" }
+```
+
+- **No `property`/`propertyId`.** The action supplies both: the row lands in
+  Synced Properties as `Property Name` = `Page body`, `Property Notion ID` =
+  `page_body`. That sentinel id keys, diffs and prunes exactly like a property id,
+  so nothing downstream of the manifest needs special handling.
+- **Grain is per database, never per page.** Bindings are declared per database,
+  so the only honest claim is "this build reads/writes row bodies in this DB" —
+  which is also the question a Notion editor is actually asking. A database
+  therefore carries at most **one** body binding; declaring it twice fails the run.
+- **`direction` works as usual** — `read`, `write` or `both`.
+- Writing `"propertyId": "page_body"` by hand is accepted and normalized onto the
+  same row (the id is reserved), but `"target": "body"` is the form to author: the
+  action owns the sentinel, so a typo fails loud instead of quietly creating a
+  junk row.
+- An **unknown** target fails the run rather than being ignored, so a manifest
+  written for a future target can never be half-applied by an older action.
 
 ## Local dry-run
 

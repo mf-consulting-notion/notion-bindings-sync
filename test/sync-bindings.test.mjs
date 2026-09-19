@@ -5,7 +5,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseManifest, computeDiff, reconcileManifest, syncAll } from "../sync-bindings.mjs";
+import {
+  parseManifest,
+  computeDiff,
+  reconcileManifest,
+  syncAll,
+  BODY_PROPERTY_ID,
+  BODY_PROPERTY_NAME,
+} from "../sync-bindings.mjs";
 
 const GOOD = {
   buildPageId: "build-A",
@@ -64,6 +71,109 @@ test("parseManifest: empty databases yields no desired rows", () => {
 
 const D = (over = {}) => ({ key: "db1::P1", propName: "Status", propertyId: "P1", dbId: "db1", direction: "both", ...over });
 const E = (over = {}) => ({ key: "db1::P1", pageId: "pg1", propName: "Status", dbId: "db1", direction: "Both", validationStatus: "Validated", ...over });
+
+// --- page-body target -------------------------------------------------------
+// The body has no Notion property id, so it rides a reserved sentinel id and must
+// behave like any other row through keying, diffing and prune.
+
+const bodyManifest = (binding) => ({
+  buildPageId: "build-A",
+  workspaceNotionId: "ws-1",
+  databases: [{ id: "db1", name: "Skills", bindings: [binding] }],
+});
+
+test('parseManifest: target "body" normalizes to the sentinel row', () => {
+  const { desired } = parseManifest(bodyManifest({ target: "body", direction: "read" }));
+  assert.deepEqual(desired, [
+    { key: `db1::${BODY_PROPERTY_ID}`, propName: BODY_PROPERTY_NAME, propertyId: BODY_PROPERTY_ID, dbId: "db1", direction: "read" },
+  ]);
+});
+
+test("parseManifest: a hand-written sentinel propertyId normalizes to the same row", () => {
+  const viaTarget = parseManifest(bodyManifest({ target: "body", direction: "write" })).desired;
+  const viaId = parseManifest(bodyManifest({ property: "whatever the author typed", propertyId: BODY_PROPERTY_ID, direction: "write" })).desired;
+  assert.deepEqual(viaId, viaTarget); // same key AND same name -> never two rows
+});
+
+test("parseManifest: body binding honours every direction", () => {
+  for (const direction of ["read", "write", "both"]) {
+    assert.equal(parseManifest(bodyManifest({ target: "body", direction })).desired[0].direction, direction);
+  }
+});
+
+test("parseManifest: a body binding with a bad direction throws", () => {
+  assert.throws(() => parseManifest(bodyManifest({ target: "body", direction: "sideways" })), /direction/);
+});
+
+test("parseManifest: an unknown target throws rather than silently no-opping", () => {
+  assert.throws(() => parseManifest(bodyManifest({ target: "comments", direction: "read" })), /unknown binding target/);
+});
+
+test("parseManifest: a body binding needs no propertyId (not reported as unresolved)", () => {
+  assert.doesNotThrow(() => parseManifest(bodyManifest({ target: "body", direction: "read" })));
+});
+
+test("parseManifest: body and property bindings coexist in one database", () => {
+  const m = {
+    buildPageId: "build-A",
+    workspaceNotionId: "ws-1",
+    databases: [{ id: "db1", name: "Skills", bindings: [
+      { property: "Name", propertyId: "title", direction: "read" },
+      { target: "body", direction: "read" },
+    ] }],
+  };
+  assert.deepEqual(parseManifest(m).desired.map((d) => d.key), ["db1::title", `db1::${BODY_PROPERTY_ID}`]);
+});
+
+test("parseManifest: the same body target declared twice throws (would double-create)", () => {
+  const m = {
+    buildPageId: "build-A",
+    workspaceNotionId: "ws-1",
+    databases: [
+      { id: "db1", name: "Skills", bindings: [{ target: "body", direction: "read" }] },
+      { id: "db1", name: "Skills (again)", bindings: [{ target: "body", direction: "read" }] },
+    ],
+  };
+  assert.throws(() => parseManifest(m), /declared twice/);
+});
+
+test("parseManifest: a duplicated property binding throws too", () => {
+  const m = {
+    buildPageId: "build-A",
+    workspaceNotionId: "ws-1",
+    databases: [{ id: "db1", bindings: [
+      { property: "Status", propertyId: "PID1", direction: "read" },
+      { property: "Status (dupe)", propertyId: "PID1", direction: "both" },
+    ] }],
+  };
+  assert.throws(() => parseManifest(m), /declared twice/);
+});
+
+test("parseManifest: the body sentinel is scoped per database, not global", () => {
+  const m = {
+    buildPageId: "build-A",
+    workspaceNotionId: "ws-1",
+    databases: [
+      { id: "db1", bindings: [{ target: "body", direction: "read" }] },
+      { id: "db2", bindings: [{ target: "body", direction: "write" }] },
+    ],
+  };
+  assert.deepEqual(parseManifest(m).desired.map((d) => d.key), [`db1::${BODY_PROPERTY_ID}`, `db2::${BODY_PROPERTY_ID}`]);
+});
+
+test("computeDiff: a body row diffs and prunes like any other row", () => {
+  const [body] = parseManifest(bodyManifest({ target: "body", direction: "read" })).desired;
+  const created = computeDiff([body], new Map());
+  assert.deepEqual(created.toCreate.map((d) => d.key), [body.key]);
+
+  const existing = new Map([[body.key, { key: body.key, pageId: "p1", propName: BODY_PROPERTY_NAME, dbId: "db1", direction: "Read", validationStatus: "Validated" }]]);
+  assert.equal(computeDiff([body], existing).unchanged, 1);
+
+  const flipped = { ...body, direction: "both" };
+  assert.deepEqual(computeDiff([flipped], existing).toUpdate.map((d) => d.key), [body.key]);
+
+  assert.deepEqual(computeDiff([], existing).toPrune.map((e) => e.pageId), ["p1"]);
+});
 
 test("computeDiff: new desired row -> create", () => {
   const diff = computeDiff([D()], new Map());
