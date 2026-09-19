@@ -43,6 +43,21 @@ test("scanDiffForTokens: database_id is caught", () => {
   assert.ok(hits.has("database_id"));
 });
 
+test("scanDiffForTokens: page-body call-sites are caught (blocks.children)", () => {
+  const diff = ["+  const blocks = await notion.blocks.children.list({ block_id: id });"].join("\n");
+  assert.deepEqual([...scanDiffForTokens(diff)].sort(), ["block_id", "blocks.children"]);
+});
+
+test("scanDiffForTokens: page-to-Markdown rendering is caught", () => {
+  assert.ok(scanDiffForTokens("+const n2m = new NotionToMarkdown({ notionClient });").has("notion-to-md"));
+  assert.ok(scanDiffForTokens('+import { NotionToMarkdown } from "notion-to-md";').has("notion-to-md"));
+});
+
+test("scanDiffForTokens: JSX children do NOT fire the content tokens", () => {
+  const diff = ["+  return <Layout>{children}</Layout>;", "+  const { children } = props;"].join("\n");
+  assert.equal(scanDiffForTokens(diff).size, 0);
+});
+
 test("skipReason: title marker opts out", () => {
   assert.match(skipReason("Refactor client [skip-bindings-check]", ""), /title/);
 });

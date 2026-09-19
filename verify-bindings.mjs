@@ -41,6 +41,11 @@ const CODE_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rb)$/;
 const ALWAYS_IGNORE = new Set(["sync-bindings.mjs", "verify-bindings.mjs"]);
 
 // Heuristic Notion call-site tokens. Each is [label, regex] tested per diff line.
+// Two families: PROPERTY call-sites, and — since a manifest can bind a page's
+// BODY — CONTENT call-sites (block reads/writes, page→Markdown rendering). The
+// content set is deliberately narrow: `children:` alone is not here, because JSX
+// makes it fire on half the files in a React repo and a gate nobody reads is
+// worse than a gate with a known blind spot.
 export const TOKENS = [
   ["pages.create", /\bpages\.create\b/],
   ["pages.update", /\bpages\.update\b/],
@@ -49,6 +54,9 @@ export const TOKENS = [
   ["database_id", /\bdatabase_id\b/],
   ["properties:/=", /\bproperties\s*[:=]/],
   [".query(", /\.query\s*\(/],
+  ["blocks.children", /\bblocks\.children\b/],
+  ["block_id", /\bblock_id\b/],
+  ["notion-to-md", /\bnotion-to-md\b|\bNotionToMarkdown\b|\bn2m\b/],
 ];
 
 /** Scan a unified-diff string; return the set of token labels hit on +/- lines. */

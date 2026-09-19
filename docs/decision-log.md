@@ -51,3 +51,28 @@ Engineering calls made during implementation. One line each; rationale terse.
   buys is uniform scaffolding: register-build can drop ONE standard root workflow pair
   per caller instead of a hand-maintained N-job file, and the reconcile system fans
   out to all builds.
+- **Page body = reserved sentinel propertyId `page_body`** — authored as
+  `{"target":"body","direction":…}`, normalized by `parseManifest` to
+  `Page body`/`page_body`. Rides the existing `${dbId}::${propertyId}` key, so
+  create/update/prune/validation are unchanged. Per-DATABASE grain (bindings are
+  declared per database; per-page is not expressible and not the question being
+  asked). Hand-written sentinel id accepted and normalized onto the same row;
+  unknown `target` THROWS (an older action must not half-apply a newer manifest).
+- **`parseManifest` rejects duplicate keys** — `computeDiff` does not dedupe
+  `desired`, so a key declared twice double-created the row. Latent for named
+  properties, reachable with the nameless body target.
+- **Verify gains CONTENT tokens** — `blocks.children`, `block_id`,
+  `notion-to-md`/`NotionToMarkdown`/`n2m`, so a body binding has a drift gate at all.
+  Bare `children:` deliberately excluded: JSX fires it everywhere and a noisy gate
+  gets ignored, which is worse than a known blind spot.
+
+- **`via` on the DATABASE entry, manifest-only** — validated non-empty string,
+  carried onto that DB's desired rows, echoed in the CI log, never written to
+  Notion. The annotated rows are ordinary property rows and already produce the
+  Yanta edge; only provenance is new and its audience is the next author. A Synced
+  Properties column would mean a shared-DB schema change + Yanta harvest change for
+  data no consumer reads. Omitted from the row object entirely when unset (keeps the
+  reconcile shape unchanged).
+- **Drift gate deliberately still blind to `via` bindings** — no call sites to grep;
+  the real fix (phase 2 resolving what an aggregating endpoint materializes) belongs
+  in register-build.

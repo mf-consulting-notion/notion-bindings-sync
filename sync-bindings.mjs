@@ -35,11 +35,67 @@ export const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
 // and "Validation source" is the validator's job (Make Agent with Yanta MCP).
 export const PENDING_STATUS = "Pending validation";
 
+// A page's BODY (its block content) is a real dependency but has no Notion
+// property id, so it cannot be named the way every other binding is. It rides on
+// a reserved sentinel id instead: `${dbId}::page_body` keys, diffs and prunes
+// exactly like a property row, so reconcile/prune/validation learn nothing new.
+// Grain is per DATABASE ("this build touches row bodies in this DB"), never per
+// page — bindings are declared per database, so that is the only honest grain.
+export const BODY_TARGET = "body";
+export const BODY_PROPERTY_ID = "page_body";
+export const BODY_PROPERTY_NAME = "Page body";
+
+/**
+ * Pure: one binding entry → its Synced Properties identity ({propName, propertyId}),
+ * or null when the id is not resolved yet (the caller aggregates those).
+ *
+ * A `target` binding names something with no property id of its own — currently
+ * only the page body. A binding that hand-writes the sentinel id instead is
+ * normalized onto the SAME identity, so the two spellings can never produce two
+ * rows for one dependency. An unknown target throws rather than no-opping: a
+ * future target must fail loud on an action that predates it, not vanish.
+ */
+function bindingIdentity(b, label, where) {
+  if (b.target !== undefined) {
+    if (b.target !== BODY_TARGET) {
+      throw new Error(`${label}: unknown binding target "${b.target}" for ${where} (the only target is "${BODY_TARGET}")`);
+    }
+    return { propName: BODY_PROPERTY_NAME, propertyId: BODY_PROPERTY_ID };
+  }
+  if (b.propertyId === BODY_PROPERTY_ID) return { propName: BODY_PROPERTY_NAME, propertyId: BODY_PROPERTY_ID };
+  if (!b.propertyId) return null;
+  return { propName: b.property, propertyId: b.propertyId };
+}
+
+/**
+ * Pure: a database entry's optional `via` provenance marker, or undefined.
+ *
+ * Most bindings are evidenced by a call site in the repo — `register-build` phase 2
+ * finds them by grepping for Notion API calls. A build that reads a database through
+ * an AGGREGATING endpoint has no such call site: the properties it depends on are
+ * materialized server-side and never appear in its code, so a grep concludes "this
+ * build syncs nothing" while the coupling is real and invisible. `via` records how
+ * the dependency arises, so a hand-authored binding reads as a deliberate API
+ * declaration rather than as parsing code someone forgot to write.
+ *
+ * Declaration only: it is NOT written to Synced Properties. The property rows it
+ * annotates already produce the Yanta edge; `via` exists for whoever next authors
+ * or re-captures this manifest. Putting it on the wire would mean a schema change
+ * on a shared DB plus a Yanta harvest change for information no consumer reads yet.
+ */
+function parseVia(db, label) {
+  if (db.via === undefined) return undefined;
+  if (typeof db.via !== "string" || !db.via.trim()) {
+    throw new Error(`${label}: "via" for ${db.name ?? db.id} must be a non-empty string (e.g. "api:/v1/ai/plugins")`);
+  }
+  return db.via.trim();
+}
+
 /**
  * Pure: manifest JSON → normalized reconcile input. Throws on structural problems
- * (missing buildPageId/workspaceNotionId, bad direction, any binding missing a
- * resolved propertyId — with the full unresolved list). `label` names the manifest
- * in error messages (defaults to a generic tag).
+ * (missing buildPageId/workspaceNotionId, bad direction, target or via, a duplicate
+ * binding, any binding missing a resolved propertyId — with the full unresolved
+ * list). `label` names the manifest in error messages (defaults to a generic tag).
  */
 export function parseManifest(manifest, label = "bindings.json") {
   const buildPageId = manifest.buildPageId;
@@ -49,21 +105,34 @@ export function parseManifest(manifest, label = "bindings.json") {
 
   const desired = [];
   const unresolved = [];
+  const seen = new Set();
   for (const db of manifest.databases ?? []) {
+    const via = parseVia(db, label);
     for (const b of db.bindings ?? []) {
-      if (!b.propertyId) {
+      const where = `${db.name ?? db.id} → ${b.target !== undefined ? b.target : `"${b.property}"`}`;
+      const identity = bindingIdentity(b, label, where);
+      if (!identity) {
         unresolved.push(`${db.name ?? db.id} → "${b.property}"`);
         continue;
       }
       if (!DIRECTION_LABEL[b.direction]) {
-        throw new Error(`${label}: bad direction "${b.direction}" for ${db.id} → ${b.property}`);
+        throw new Error(`${label}: bad direction "${b.direction}" for ${db.id} → ${identity.propName}`);
       }
+      // computeDiff keys rows but does not deduplicate `desired`: a key declared
+      // twice would create the row twice. Rare for named properties, easy to hit
+      // with the nameless body target (same DB listed twice) — so fail loud.
+      const key = `${db.id}::${identity.propertyId}`;
+      if (seen.has(key)) throw new Error(`${label}: duplicate binding ${where} — ${key} is declared twice`);
+      seen.add(key);
       desired.push({
-        key: `${db.id}::${b.propertyId}`,
-        propName: b.property,
-        propertyId: b.propertyId,
+        key,
+        propName: identity.propName,
+        propertyId: identity.propertyId,
         dbId: db.id,
         direction: b.direction,
+        // Declaration-only (never written to Notion); omitted entirely when unset
+        // so the reconcile row shape is unchanged for the overwhelming majority.
+        ...(via !== undefined && { via }),
       });
     }
   }
@@ -110,8 +179,8 @@ export async function reconcileManifest(parsed, deps) {
     `bindings sync (${deps.dryRun ? "DRY RUN" : "apply"}) — build ${buildPageId}\n` +
       `  create ${toCreate.length} · update ${toUpdate.length} · prune ${toPrune.length} · unchanged ${unchanged}`,
   );
-  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
-  for (const d of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]`);
+  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
+  for (const d of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
   for (const e of toPrune) deps.log(`  - ${e.dbId.slice(0, 8)} ${e.propName}`);
   if (deps.dryRun) return diff;
 
@@ -119,6 +188,11 @@ export async function reconcileManifest(parsed, deps) {
   for (const d of toUpdate) await deps.updateRow(existing.get(d.key).pageId, d);
   for (const e of toPrune) await deps.archiveRow(e.pageId);
   return diff;
+}
+
+/** CI-log suffix naming a binding's non-code provenance, or "" for the normal case. */
+function viaNote(d) {
+  return d.via ? ` (via ${d.via})` : "";
 }
 
 /**
