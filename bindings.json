@@ -11,7 +11,10 @@
         { "property": "Database Notion ID", "propertyId": "joTm", "direction": "both" },
         { "property": "Workspace Notion ID", "propertyId": "%7DHJ_", "direction": "write" },
         { "property": "Build", "propertyId": "oXMu", "direction": "both" },
-        { "property": "Direction", "propertyId": "pbeH", "direction": "both" }
+        { "property": "Direction", "propertyId": "pbeH", "direction": "both" },
+        { "property": "Validation status", "propertyId": "u%3BAY", "direction": "both" },
+        { "property": "Last validated at", "propertyId": "zqXY", "direction": "write" },
+        { "property": "Validation source", "propertyId": "Gh%5Eg", "direction": "write" }
       ]
     }
   ],
