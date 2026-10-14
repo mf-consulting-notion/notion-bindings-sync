@@ -31,7 +31,7 @@ const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
 export const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
 // Validation ownership: this CI only DECLARES bindings and therefore only ever
 // invalidates — new/changed rows get status "Pending validation" and cleared
-// validator fields. Setting "Validated"/"Stale"/"Unresolved", "Last validated at"
+// validator fields. Setting "Validated"/"Stale"/"Unverifiable", "Last validated at"
 // and "Validation source" is the validator's job (Make Agent with Yanta MCP).
 export const PENDING_STATUS = "Pending validation";
 
