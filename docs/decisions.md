@@ -34,7 +34,7 @@ validator-owned fields).
 
 **Why:** the action is deliberately resolution-free — one MF-scoped token, no read
 access to target databases — so it *cannot* verify a binding against reality.
-Validation (setting `Validated`/`Stale`/`Unresolved`, `Last validated at`,
+Validation (setting `Validated`/`Stale`/`Unverifiable`, `Last validated at`,
 `Validation source`) is owned by the validator: the Notion Make Agent with Yanta
 MCP access. One validator for all rows, regardless of whether the declaration came
 from this CI or from the agent itself.

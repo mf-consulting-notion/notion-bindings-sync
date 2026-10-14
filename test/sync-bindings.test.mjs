@@ -274,7 +274,7 @@ test("computeDiff: empty validation status self-heals to update (pre-migration r
 });
 
 test("computeDiff: any non-empty validation status is respected on unchanged bindings", () => {
-  for (const status of ["Validated", "Delta-validated", "Pending validation", "Stale", "Unresolved"]) {
+  for (const status of ["Validated", "Delta-validated", "Pending validation", "Stale", "Unverifiable"]) {
     const diff = computeDiff([D()], new Map([["db1::P1", E({ validationStatus: status })]]));
     assert.equal(diff.toUpdate.length, 0, status);
     assert.equal(diff.unchanged, 1, status);
