@@ -109,3 +109,38 @@ call-site tokens and an API-mediated build has none to change, so a `via` databa
 bindings can go stale with nothing failing a PR. Making phase 2 resolve what an
 aggregating endpoint materializes is the real fix, and it belongs in `register-build`,
 not here.
+
+## Bindings bind Pieces; moving a binding re-points the row in place
+
+Process Model V1 makes a Synced Properties row "one property × one **Piece**"
+(`Bound to`, limit 1) instead of "one property × one Build". Manifests opt in with
+`pieceId` (binding → database entry → top level; `null` = explicitly Unresolved).
+A manifest with no `pieceId` anywhere is **legacy** and reconciles exactly as before.
+
+**Why the key carries the Piece:** one property touched by two Pieces of a Build is
+two rows (spec §4). Legacy keeps `${dbId}::${propertyId}` so nothing changes for the
+callers that haven't migrated; Piece-aware manifests key on
+`${pieceId|unresolved}::${dbId}::${propertyId}`.
+
+**Why re-point instead of prune + create:** migration happens per Build, onto rows
+that already exist (~280 Build-grain rows). Changing the key naively would prune and
+recreate every one of them — new page ids for Yanta, validation thrown away. After
+exact matching, leftover desired rows take over leftover rows of the *same* database ×
+property (Build-grain rows first, then by page id; desired in manifest order), and
+only `Bound to` is written. One rule covers adopting Build-grain rows, moving between
+Pieces and falling back to Unresolved.
+
+**Why a re-point keeps validation:** validation checks the property against the
+harvested schema; which Piece touches it doesn't change that answer. Validation is
+voided only when the declaration itself changes (direction, name) — as before.
+
+**Why the guards fail loud:** a legacy manifest on a Build with Piece-bound rows would
+silently un-bind or collide them, so it fails. Every named Piece is fetched before any
+write (also in dry-run) and must be a live Pieces page, `Part of` the manifest's Build,
+not `Retired` — a mistyped or stale `pieceId` must not produce a plausible-looking row.
+The token therefore needs READ on Pieces.
+
+**Still Build-scoped:** `Build` is written on every row and stays the prune scope
+until it is deprecated. Known transitional limit: a Piece shared by two Builds and
+declared in both manifests yields one row per Build for the same Piece × property.
+The provenance key for Unresolved rows is decided when `Build` goes.

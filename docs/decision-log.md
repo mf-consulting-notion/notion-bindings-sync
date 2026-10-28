@@ -76,3 +76,19 @@ Engineering calls made during implementation. One line each; rationale terse.
 - **Drift gate deliberately still blind to `via` bindings** — no call sites to grep;
   the real fix (phase 2 resolving what an aggregating endpoint materializes) belongs
   in register-build.
+
+## 2026-10-28 — Piece-aware bindings (plan: docs/plans/piece-aware-bindings.md)
+
+- **Field `pieceId`**, matching `buildPageId`/`propertyId`; dashed or 32-hex, normalized to lowercase dashed (the form `Bound to` returns), so manifest and row keys compare.
+- **Three levels (binding → database → top level)** — the top level covers the common one-Piece Build (Objektreport: 146 bindings) without 12 repetitions.
+- **Several Pieces on one property = the binding listed once per Piece** — keeps one entry = one row; no array-valued field.
+- **Piece-aware as soon as any `pieceId` key exists**, then every binding must resolve one (aggregated error) — a forgotten id must not silently become Unresolved.
+- **Re-point pairing per database × property**, Build-grain rows first, then page id; desired in manifest order — deterministic, and adopting legacy rows is the common case.
+- **Duplicate existing rows converge** (lowest page id stays) — previously the Map silently hid the extras.
+- **`existing` is an array** (keys computed in `computeDiff`) — the key now depends on the manifest's mode, which the fetch can't know.
+- **Payloads are pure builders** (`createPayload`, `updatePayload`) — the no-validation-reset rule is a payload property, so it is tested on the payload.
+- **Piece check runs in dry-run too** — a dry-run is the place to learn that an id is wrong.
+- **Legacy CI log unchanged**; Piece-aware manifests add `re-point` / `unresolved` counts and `>` lines.
+- **Verify reports `pieceId: null` counts, never fails on them** — Unresolved is a valid state, and verify reads no Notion.
+- **`pieces-ds` action input** mirrors `synced-properties-ds`.
+- **Own manifest gains `Bound to` (both)**; stays legacy until this action has a Piece.

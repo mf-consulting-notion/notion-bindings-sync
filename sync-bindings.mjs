@@ -8,14 +8,15 @@
  * build.
  *
  * Deliberately resolution-free: it never reads the integration's target
- * databases, so the token needs access to only two MF databases — WRITE on
- * Synced Properties and READ on Builds (for the Build relation). That's what
+ * databases, so the token needs access to only three MF databases — WRITE on
+ * Synced Properties, READ on Builds (for the Build relation) and READ on Pieces
+ * (for the Bound to relation and the pieceId preflight). That's what
  * lets ONE MF-scoped token serve every integration, including ones that write
  * to client workspaces (their db/property ids ride in the manifest as plain
  * text). A binding missing its `propertyId` FAILS the run — resolution is the
  * authoring tool's job, not CI's.
  *
- * Env: NOTION_TOKEN (required in sync), SYNCED_PROPERTIES_DS, MANIFEST (empty =
+ * Env: NOTION_TOKEN (required in sync), SYNCED_PROPERTIES_DS, PIECES_DS, MANIFEST (empty =
  * discover build manifests; a path = one explicit manifest), DRY_RUN (1/true =
  * report only). Zero dependencies — plain Node 22 (global fetch, fs.globSync).
  */
@@ -27,6 +28,9 @@ const NOTION_VERSION = "2025-09-03";
 const BASE = "https://api.notion.com";
 const REQUEST_GAP_MS = 350;
 const SYNCED_PROPERTIES_DS = process.env.SYNCED_PROPERTIES_DS || "7d1aeaec-129e-4dde-9040-5761c86aef54";
+// Pieces (Process Model V1): the target of Synced Properties' `Bound to`. Read
+// only — to check a manifest's pieceIds before any write.
+export const PIECES_DS = process.env.PIECES_DS || "99ff84d6-11be-4a5e-bb68-96317ab07410";
 const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
 export const DIRECTION_LABEL = { read: "Read", write: "Write", both: "Both" };
 // Validation ownership: this CI only DECLARES bindings and therefore only ever
@@ -92,10 +96,61 @@ function parseVia(db, label) {
 }
 
 /**
+ * Pure: a Notion page id in any accepted spelling (dashed or 32-hex, any case) →
+ * lowercase dashed, the form the API returns in relations; null if it isn't one.
+ * Keys compare manifest ids against `Bound to` ids, so both sides must agree.
+ */
+export function normalizePageId(v) {
+  if (typeof v !== "string") return null;
+  const hex = v.replaceAll("-", "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(hex)) return null;
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// Key segment for an explicitly Unresolved binding (`"pieceId": null`). Not a page
+// id, so it can never collide with a real Piece.
+const UNRESOLVED_KEY = "unresolved";
+
+/**
+ * Pure: the `pieceId` declared on one manifest level — undefined (not declared
+ * here), null (explicitly Unresolved) or a normalized page id. A malformed value
+ * throws: a typo must not silently turn a binding Unresolved.
+ */
+function parsePieceId(holder, label, where) {
+  if (!Object.hasOwn(holder, "pieceId")) return undefined;
+  if (holder.pieceId === null) return null;
+  const id = normalizePageId(holder.pieceId);
+  if (!id) {
+    throw new Error(`${label}: bad pieceId ${JSON.stringify(holder.pieceId)} for ${where} (expected a Pieces page id or null)`);
+  }
+  return id;
+}
+
+/**
+ * Pure: a manifest is Piece-aware as soon as ANY level declares `pieceId` (null
+ * included). From then on every binding must resolve one — see parseManifest.
+ */
+function isPieceAware(manifest) {
+  return (
+    Object.hasOwn(manifest, "pieceId") ||
+    (manifest.databases ?? []).some(
+      (db) => Object.hasOwn(db, "pieceId") || (db.bindings ?? []).some((b) => Object.hasOwn(b, "pieceId")),
+    )
+  );
+}
+
+/**
  * Pure: manifest JSON → normalized reconcile input. Throws on structural problems
- * (missing buildPageId/workspaceNotionId, bad direction, target or via, a duplicate
- * binding, any binding missing a resolved propertyId — with the full unresolved
- * list). `label` names the manifest in error messages (defaults to a generic tag).
+ * (missing buildPageId/workspaceNotionId, bad direction, target, via or pieceId, a
+ * duplicate binding, any binding missing a resolved propertyId — with the full
+ * unresolved list — and, in a Piece-aware manifest, any binding without a pieceId).
+ * `label` names the manifest in error messages (defaults to a generic tag).
+ *
+ * Piece-aware manifests (Process Model V1) bind each row to the Piece whose code
+ * makes the call: `pieceId` on the binding, else its database entry, else the
+ * manifest's top level; `null` = explicitly Unresolved. Their keys carry the Piece,
+ * so one property touched by two Pieces is two rows. Legacy manifests keep the
+ * `${dbId}::${propertyId}` key and no `pieceId` at all.
  */
 export function parseManifest(manifest, label = "bindings.json") {
   const buildPageId = manifest.buildPageId;
@@ -103,11 +158,17 @@ export function parseManifest(manifest, label = "bindings.json") {
   if (!buildPageId) throw new Error(`${label}: missing buildPageId`);
   if (!workspaceNotionId) throw new Error(`${label}: missing workspaceNotionId`);
 
+  const pieceAware = isPieceAware(manifest);
+  const topPiece = parsePieceId(manifest, label, "the manifest");
   const desired = [];
   const unresolved = [];
+  const pieceless = [];
   const seen = new Set();
   for (const db of manifest.databases ?? []) {
     const via = parseVia(db, label);
+    // Not `??`: an explicit null (Unresolved) must override an inherited Piece.
+    const ownDbPiece = parsePieceId(db, label, db.name ?? db.id);
+    const dbPiece = ownDbPiece !== undefined ? ownDbPiece : topPiece;
     for (const b of db.bindings ?? []) {
       const where = `${db.name ?? db.id} → ${b.target !== undefined ? b.target : `"${b.property}"`}`;
       const identity = bindingIdentity(b, label, where);
@@ -118,10 +179,18 @@ export function parseManifest(manifest, label = "bindings.json") {
       if (!DIRECTION_LABEL[b.direction]) {
         throw new Error(`${label}: bad direction "${b.direction}" for ${db.id} → ${identity.propName}`);
       }
+      const ownPiece = parsePieceId(b, label, where);
+      const pieceId = ownPiece !== undefined ? ownPiece : dbPiece;
+      if (pieceAware && pieceId === undefined) {
+        pieceless.push(where);
+        continue;
+      }
       // computeDiff keys rows but does not deduplicate `desired`: a key declared
       // twice would create the row twice. Rare for named properties, easy to hit
       // with the nameless body target (same DB listed twice) — so fail loud.
-      const key = `${db.id}::${identity.propertyId}`;
+      const key = pieceAware
+        ? `${pieceId ?? UNRESOLVED_KEY}::${db.id}::${identity.propertyId}`
+        : `${db.id}::${identity.propertyId}`;
       if (seen.has(key)) throw new Error(`${label}: duplicate binding ${where} — ${key} is declared twice`);
       seen.add(key);
       desired.push({
@@ -130,6 +199,8 @@ export function parseManifest(manifest, label = "bindings.json") {
         propertyId: identity.propertyId,
         dbId: db.id,
         direction: b.direction,
+        // Omitted entirely in legacy manifests, so their row shape is unchanged.
+        ...(pieceAware && { pieceId }),
         // Declaration-only (never written to Notion); omitted entirely when unset
         // so the reconcile row shape is unchanged for the overwhelming majority.
         ...(via !== undefined && { via }),
@@ -142,52 +213,165 @@ export function parseManifest(manifest, label = "bindings.json") {
         unresolved.join("\n  "),
     );
   }
-  return { buildPageId, workspaceNotionId, desired };
+  if (pieceless.length) {
+    throw new Error(
+      `${label}: this manifest names Pieces, so every binding needs a pieceId ` +
+        `(a Pieces page id, or null for Unresolved) — missing on:\n  ` +
+        pieceless.join("\n  "),
+    );
+  }
+  return { buildPageId, workspaceNotionId, pieceAware, desired };
+}
+
+/** Pure: an existing row's reconcile key — the same shape parseManifest gives `desired`. */
+function rowKey(e, pieceAware) {
+  return pieceAware ? `${e.pieceId ?? UNRESOLVED_KEY}::${e.dbId}::${e.propertyId}` : `${e.dbId}::${e.propertyId}`;
 }
 
 /**
- * Pure: the network-free reconcile diff. `existing` is a Map keyed by
- * `${dbId}::${propertyId}` of the build's current Synced Properties rows.
+ * Pure: does this row need its declaration rewritten (and validation voided)?
+ * Empty validationStatus self-heals rows created before the validation
+ * properties existed (converges on the next regular run, no manual backfill).
  */
-export function computeDiff(desired, existing) {
-  const desiredByKey = new Map(desired.map((d) => [d.key, d]));
-  const toCreate = desired.filter((d) => !existing.has(d.key));
-  const toUpdate = desired.filter((d) => {
-    const e = existing.get(d.key);
-    // Empty validationStatus self-heals rows created before the validation
-    // properties existed (converges on the next regular run, no manual backfill).
-    return e && (e.direction !== DIRECTION_LABEL[d.direction] || e.propName !== d.propName || !e.validationStatus);
-  });
-  const toPrune = [...existing.values()].filter((e) => !desiredByKey.has(e.key));
-  const unchanged = desired.length - toCreate.length - toUpdate.length;
-  return { toCreate, toUpdate, toPrune, unchanged };
+function declarationChanged(e, d) {
+  return e.direction !== DIRECTION_LABEL[d.direction] || e.propName !== d.propName || !e.validationStatus;
+}
+
+/**
+ * Pure: the network-free reconcile diff. `existing` is the build's current
+ * Synced Properties rows ({pageId, propName, dbId, propertyId, direction,
+ * validationStatus, pieceId}). Returns
+ *   { toCreate: desired[], toUpdate: change[], toRepoint: change[], toPrune: row[], unchanged }
+ * with change = { row, d, resetValidation }.
+ *
+ * Piece-aware (`pieceAware: true`): rows key on Piece × database × property. A
+ * desired row with no exact match takes over a leftover row of the SAME database ×
+ * property instead of prune + create — a RE-POINT that only moves `Bound to`, so
+ * the row keeps its page id and its validation state (validation concerns the
+ * schema, not the Piece). Leftover rows are offered Build-grain first, then by
+ * page id; desired rows claim them in manifest order. This one rule covers
+ * adopting Build-grain rows, moving between Pieces and falling back to Unresolved.
+ *
+ * Legacy: keys ignore the Piece, exactly as before Piece-aware manifests — and a
+ * Build that already has Piece-grain rows is refused, because dropping pieceIds
+ * would silently un-bind or collide them.
+ */
+export function computeDiff(desired, existing, { pieceAware = false } = {}) {
+  if (!pieceAware) {
+    const bound = existing.filter((e) => e.pieceId);
+    if (bound.length) {
+      throw new Error(
+        `this Build already has ${bound.length} Piece-bound row(s) in Synced Properties, but the manifest names no ` +
+          `Piece — add the pieceIds back (or "pieceId": null for Unresolved) instead of dropping them`,
+      );
+    }
+  }
+
+  // Index existing rows by key. Duplicates (two rows, one key) converge: the
+  // lowest page id stays, the rest prune.
+  const byKey = new Map();
+  const toPrune = [];
+  for (const e of existing) {
+    const key = rowKey(e, pieceAware);
+    const held = byKey.get(key);
+    if (!held) {
+      byKey.set(key, e);
+    } else {
+      const [keep, drop] = e.pageId < held.pageId ? [e, held] : [held, e];
+      byKey.set(key, keep);
+      toPrune.push(drop);
+    }
+  }
+
+  const toUpdate = [];
+  const leftoverDesired = [];
+  let unchanged = 0;
+  for (const d of desired) {
+    const e = byKey.get(d.key);
+    if (!e) leftoverDesired.push(d);
+    else if (declarationChanged(e, d)) toUpdate.push({ row: e, d, resetValidation: true });
+    else unchanged++;
+    if (e) byKey.delete(d.key);
+  }
+  const leftoverRows = [...byKey.values()];
+
+  const toCreate = [];
+  const toRepoint = [];
+  if (pieceAware) {
+    const slot = (x) => `${x.dbId}::${x.propertyId}`;
+    const free = new Map();
+    // Build-grain rows first (adopting them is the migration), then by page id.
+    const order = (a, b) => {
+      if ((a.pieceId === null) !== (b.pieceId === null)) return a.pieceId === null ? -1 : 1;
+      return a.pageId < b.pageId ? -1 : 1;
+    };
+    for (const e of [...leftoverRows].sort(order)) {
+      if (!free.has(slot(e))) free.set(slot(e), []);
+      free.get(slot(e)).push(e);
+    }
+    for (const d of leftoverDesired) {
+      const e = free.get(slot(d))?.shift();
+      if (e) toRepoint.push({ row: e, d, resetValidation: declarationChanged(e, d) });
+      else toCreate.push(d);
+    }
+    for (const rest of free.values()) toPrune.push(...rest);
+  } else {
+    toCreate.push(...leftoverDesired);
+    toPrune.push(...leftoverRows);
+  }
+  return { toCreate, toUpdate, toRepoint, toPrune, unchanged };
 }
 
 /**
  * Reconcile ONE parsed manifest via injected side-effects. Network-free in tests.
- * deps = { fetchExisting(buildPageId)->Map, createRow(d,build,ws), updateRow(pageId,d),
- *          archiveRow(pageId), dryRun, log(msg) }. Returns the applied diff.
+ * deps = { checkPieces(pieceIds,build), fetchExisting(buildPageId)->row[],
+ *          createRow(d,build,ws), updateRow(pageId,payload), archiveRow(pageId),
+ *          dryRun, log(msg) }. Returns the applied diff.
  * Prune is structurally build-scoped: `existing` only ever holds this build's rows.
+ * Named Pieces are checked first — also in a dry run — so a wrong pieceId fails
+ * before anything is read or written.
  */
 export async function reconcileManifest(parsed, deps) {
-  const { buildPageId, workspaceNotionId, desired } = parsed;
+  const { buildPageId, workspaceNotionId, pieceAware, desired } = parsed;
+  const pieceIds = [...new Set(desired.map((d) => d.pieceId).filter(Boolean))];
+  if (pieceIds.length) await deps.checkPieces(pieceIds, buildPageId);
   const existing = await deps.fetchExisting(buildPageId);
-  const diff = computeDiff(desired, existing);
-  const { toCreate, toUpdate, toPrune, unchanged } = diff;
+  const diff = computeDiff(desired, existing, { pieceAware });
+  const { toCreate, toUpdate, toRepoint, toPrune, unchanged } = diff;
 
+  // Legacy manifests log exactly what they always did; the Piece counts appear
+  // only once a manifest names Pieces.
+  const pieceCounts = pieceAware
+    ? ` · re-point ${toRepoint.length}` + ` · unresolved ${desired.filter((d) => d.pieceId === null).length}`
+    : "";
   deps.log(
     `bindings sync (${deps.dryRun ? "DRY RUN" : "apply"}) — build ${buildPageId}\n` +
-      `  create ${toCreate.length} · update ${toUpdate.length} · prune ${toPrune.length} · unchanged ${unchanged}`,
+      `  create ${toCreate.length} · update ${toUpdate.length} · prune ${toPrune.length} · unchanged ${unchanged}` +
+      pieceCounts,
   );
-  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
-  for (const d of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
-  for (const e of toPrune) deps.log(`  - ${e.dbId.slice(0, 8)} ${e.propName}`);
+  for (const d of toCreate) deps.log(`  + ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${pieceNote(d.pieceId)}${viaNote(d)}`);
+  for (const { d } of toUpdate) deps.log(`  ~ ${d.dbId.slice(0, 8)} ${d.propName} [${d.direction}]${viaNote(d)}`);
+  for (const { row, d } of toRepoint) {
+    deps.log(`  > ${d.dbId.slice(0, 8)} ${d.propName} ${shortPiece(row.pieceId)} → ${shortPiece(d.pieceId)}`);
+  }
+  for (const e of toPrune) deps.log(`  - ${e.dbId.slice(0, 8)} ${e.propName}${pieceAware ? pieceNote(e.pieceId) : ""}`);
   if (deps.dryRun) return diff;
 
   for (const d of toCreate) await deps.createRow(d, buildPageId, workspaceNotionId);
-  for (const d of toUpdate) await deps.updateRow(existing.get(d.key).pageId, d);
+  for (const c of toUpdate) await deps.updateRow(c.row.pageId, updatePayload(c, { setPiece: false }));
+  for (const c of toRepoint) await deps.updateRow(c.row.pageId, updatePayload(c, { setPiece: true }));
   for (const e of toPrune) await deps.archiveRow(e.pageId);
   return diff;
+}
+
+/** CI-log form of a Piece: its first 8 hex chars, or ∅ for Unresolved. */
+function shortPiece(pieceId) {
+  return pieceId ? pieceId.slice(0, 8) : "∅";
+}
+
+/** CI-log suffix naming the Piece of a Piece-grain row, or "" for a legacy one. */
+function pieceNote(pieceId) {
+  return pieceId === undefined ? "" : ` @${shortPiece(pieceId)}`;
 }
 
 /** CI-log suffix naming a binding's non-code provenance, or "" for the normal case. */
@@ -236,9 +420,10 @@ async function main() {
     log: (m) => console.log(m),
     labelFor: (p) => p.slice(process.cwd().length + 1) || p,
     readManifest: (p) => JSON.parse(readFileSync(p, "utf8")),
+    checkPieces: (pieceIds, buildPageId) => checkPieces(pieceIds, buildPageId, TOKEN),
     fetchExisting: (buildPageId) => existingRowsForBuild(buildPageId, TOKEN),
-    createRow: (d, build, ws) => createRow(d, build, ws, TOKEN),
-    updateRow: (pageId, d) => updateRow(pageId, d, TOKEN),
+    createRow: (d, build, ws) => request("/v1/pages", "POST", createPayload(d, build, ws), TOKEN),
+    updateRow: (pageId, payload) => request(`/v1/pages/${pageId}`, "PATCH", payload, TOKEN),
     archiveRow: (pageId) => archiveRow(pageId, TOKEN),
   };
 
@@ -254,7 +439,7 @@ async function main() {
 }
 
 async function existingRowsForBuild(buildPageId, TOKEN) {
-  const out = new Map();
+  const out = [];
   let cursor;
   do {
     const res = await request(`/v1/data_sources/${SYNCED_PROPERTIES_DS}/query`, "POST", {
@@ -266,14 +451,14 @@ async function existingRowsForBuild(buildPageId, TOKEN) {
       const propertyId = plain(r.properties["Property Notion ID"]?.rich_text);
       const dbId = plain(r.properties["Database Notion ID"]?.rich_text);
       if (!propertyId || !dbId) continue;
-      const key = `${dbId}::${propertyId}`;
-      out.set(key, {
-        key,
+      out.push({
         pageId: r.id,
         propName: plain(r.properties["Property Name"]?.title),
         dbId,
+        propertyId,
         direction: r.properties["Direction"]?.select?.name ?? "",
         validationStatus: r.properties["Validation status"]?.select?.name ?? "",
+        pieceId: r.properties["Bound to"]?.relation?.[0]?.id ?? null,
       });
     }
     cursor = res.has_more && res.next_cursor ? res.next_cursor : undefined;
@@ -281,8 +466,14 @@ async function existingRowsForBuild(buildPageId, TOKEN) {
   return out;
 }
 
-function createRow(d, buildPageId, workspaceNotionId, TOKEN) {
-  return request("/v1/pages", "POST", {
+/**
+ * Pure: POST body for a new Synced Properties row. `Build` is always written
+ * (still the prune scope and still read downstream); `Bound to` only for a named
+ * Piece — an Unresolved or legacy row leaves it empty, which Resolution reads as
+ * Unresolved. Never falls back to the Build.
+ */
+export function createPayload(d, buildPageId, workspaceNotionId) {
+  return {
     parent: { type: "data_source_id", data_source_id: SYNCED_PROPERTIES_DS },
     properties: {
       "Property Name": { title: [{ text: { content: d.propName } }] },
@@ -290,24 +481,64 @@ function createRow(d, buildPageId, workspaceNotionId, TOKEN) {
       "Database Notion ID": { rich_text: [{ text: { content: d.dbId } }] },
       "Workspace Notion ID": { rich_text: [{ text: { content: workspaceNotionId } }] },
       Build: { relation: [{ id: buildPageId }] },
+      ...(typeof d.pieceId === "string" && { "Bound to": { relation: [{ id: d.pieceId }] } }),
       Direction: { select: { name: DIRECTION_LABEL[d.direction] } },
       "Validation status": { select: { name: PENDING_STATUS } },
     },
-  }, TOKEN);
+  };
 }
 
-function updateRow(pageId, d, TOKEN) {
-  return request(`/v1/pages/${pageId}`, "PATCH", {
+/**
+ * Pure: PATCH body for an update or a re-point (change = {d, resetValidation}).
+ * `setPiece` writes `Bound to` (empty for Unresolved). Validation is voided only
+ * when the declaration itself changed — a re-point alone keeps it, because
+ * validation concerns the schema, not which Piece touches it.
+ */
+export function updatePayload({ d, resetValidation }, { setPiece }) {
+  return {
     properties: {
       "Property Name": { title: [{ text: { content: d.propName } }] },
       Direction: { select: { name: DIRECTION_LABEL[d.direction] } },
+      ...(setPiece && { "Bound to": { relation: d.pieceId ? [{ id: d.pieceId }] : [] } }),
       // A changed declaration voids any prior validation — reset to pending and
       // clear the validator-owned fields.
-      "Validation status": { select: { name: PENDING_STATUS } },
-      "Last validated at": { date: null },
-      "Validation source": { select: null },
+      ...(resetValidation && {
+        "Validation status": { select: { name: PENDING_STATUS } },
+        "Last validated at": { date: null },
+        "Validation source": { select: null },
+      }),
     },
-  }, TOKEN);
+  };
+}
+
+/**
+ * Pure: why a fetched Pieces page can't take this Build's bindings ([] = fine).
+ * Bindings exist only for live Pieces of the manifest's own Build — anything else
+ * is a stale or mistyped pieceId that Notion would accept (or reject opaquely).
+ */
+export function pieceProblems(page, buildPageId) {
+  const problems = [];
+  if (normalizePageId(page.parent?.data_source_id) !== normalizePageId(PIECES_DS)) problems.push("is not a Pieces page");
+  if (page.in_trash || page.archived) problems.push("is in the trash");
+  const partOf = (page.properties?.["Part of"]?.relation ?? []).map((r) => normalizePageId(r.id));
+  if (!partOf.includes(normalizePageId(buildPageId))) problems.push(`is not Part of build ${buildPageId}`);
+  if (page.properties?.Lifecycle?.select?.name === "Retired") problems.push("is Retired (a Retired Piece has no bindings)");
+  return problems;
+}
+
+/** Fetch each named Piece and fail with every problem at once (before any write). */
+async function checkPieces(pieceIds, buildPageId, TOKEN) {
+  const problems = [];
+  for (const id of pieceIds) {
+    try {
+      const page = await request(`/v1/pages/${id}`, "GET", undefined, TOKEN);
+      for (const p of pieceProblems(page, buildPageId)) problems.push(`${id} ${p}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      problems.push(`${id} could not be read (does the token have READ on Pieces?) — ${msg}`);
+    }
+  }
+  if (problems.length) throw new Error(`Piece check failed:\n  ${problems.join("\n  ")}`);
 }
 
 // Archived rows drop out of Yanta's next fetch, so its own prune removes them.

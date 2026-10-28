@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { discoverManifests, ownerManifestDir } from "../manifests.mjs";
+import { discoverManifests, ownerManifestDir, countExplicitUnresolved } from "../manifests.mjs";
 
 /** Build a throwaway repo tree; return its root dir. */
 function fixtureTree() {
@@ -91,4 +91,27 @@ test("ownerManifestDir: a service file is not owned by a sibling service", () =>
   assert.equal(ownerManifestDir("contacts-worker/api.ts", dirs), "contacts-worker/");
   // 'drive-worker-legacy/' must NOT be captured by the 'drive-worker/' prefix
   assert.equal(ownerManifestDir("drive-worker-legacy/api.ts", ["drive-worker/"]), null);
+});
+
+// ---- countExplicitUnresolved (verify's informational Unresolved report) --------
+
+const P1 = "4079eca4-d310-8191-9311-cca619d9e5b2";
+
+test("countExplicitUnresolved: counts bindings whose effective pieceId is null, at every level", () => {
+  const m = {
+    pieceId: null,
+    databases: [
+      { id: "db1", bindings: [{ propertyId: "a" }, { propertyId: "b", pieceId: P1 }] }, // a ← top null
+      { id: "db2", pieceId: P1, bindings: [{ propertyId: "c" }, { propertyId: "d", pieceId: null }] }, // d
+      { id: "db3", pieceId: null, bindings: [{ propertyId: "e" }] }, // e
+    ],
+  };
+  assert.equal(countExplicitUnresolved(m), 3);
+});
+
+test("countExplicitUnresolved: legacy and malformed manifests count 0 (sync is where they fail)", () => {
+  assert.equal(countExplicitUnresolved({ databases: [{ id: "db1", bindings: [{ propertyId: "a" }] }] }), 0);
+  for (const bad of [null, "x", 42, { databases: "nope" }, { databases: [null, { bindings: "nope" }] }]) {
+    assert.equal(countExplicitUnresolved(bad), 0);
+  }
 });

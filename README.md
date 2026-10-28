@@ -1,7 +1,7 @@
 # notion-bindings-sync
 
 A GitHub composite action that pushes a repo's declared `bindings.json`
-(Build→Property bindings) into the MF **Synced Properties** Notion DB, which
+(Piece→Property bindings, Process Model V1) into the MF **Synced Properties** Notion DB, which
 [Yanta](https://github.com/mf-consulting-notion/yanta) bi-syncs into its schema
 model (ADR 0007). Deterministic, per-build **upsert + prune** — no code
 introspection, no LLM.
@@ -35,6 +35,7 @@ repo as its own secret rather than set once org-wide (see "One-time setup" below
 **Token scope** (`NOTION_BINDINGS_TOKEN`): a Notion internal integration with
 - **write** on *Synced Properties*
 - **read** on *Builds* (the `Build` field is a relation; setting it needs access to the related DB)
+- **read** on *Pieces* (the `Bound to` relation, and the pre-write check of every `pieceId`)
 
 Nothing else — not the integrations' target DBs, not GitHub Repos.
 
@@ -212,6 +213,50 @@ for orientation only:
 
 A property binding without a `propertyId` fails the run — resolution is the
 authoring tool's job (`register-build` phase 2), not CI's.
+
+### Binding to Pieces (`pieceId`)
+
+Process Model V1 binds a property to the **Piece** whose code makes the Notion call
+(a Worker, a script, a scenario — never a library, never the trigger), not to the
+Build. One Synced Properties row = one property × one Piece, via the `Bound to`
+relation; `Resolution` (a formula) reads Unresolved while `Bound to` is empty.
+Canonical rules: Notion "Process Model V1 — Spec" §4 and the glossary entry
+"Synced Properties Database". Vocabulary for this repo: [`CONTEXT.md`](CONTEXT.md).
+
+```json
+{
+  "buildPageId": "<Builds page id>",
+  "workspaceNotionId": "<target workspace's Notion id>",
+  "pieceId": "<Pieces page id — default for every binding>",
+  "databases": [
+    { "id": "<data_source_id>", "name": "Deals", "bindings": [
+      { "property": "Portfolio", "propertyId": "YcCO", "direction": "read" },
+      { "property": "Portfolio", "propertyId": "YcCO", "direction": "write", "pieceId": "<another Piece>" },
+      { "property": "Notes", "propertyId": "a1B2", "direction": "read", "pieceId": null }
+    ] }
+  ]
+}
+```
+
+- **Three levels, nearest wins:** a binding's `pieceId`, else its database entry's,
+  else the manifest's top level. One Piece for the whole Build = one line at the top.
+- **Several Pieces touch one property** → list the binding once per Piece (same
+  `propertyId`, different `pieceId`). Each becomes its own row.
+- **`"pieceId": null` = explicitly Unresolved** — the executing Piece isn't known
+  yet. The row has an empty `Bound to`; it is never bound to the Build instead. The
+  verify gate reports these counts (informational, never a failure).
+- **All or nothing.** As soon as any level declares `pieceId` (null included), every
+  binding must resolve one, or the run fails listing the bindings without one.
+  Manifests with no `pieceId` at all are **legacy** and reconcile exactly as before.
+- **Checked before any write** (also in dry-run): every named Piece must be a live
+  page in Pieces, `Part of` the manifest's Build, and not `Retired`.
+- **Reattachment is in place.** When a Build moves to Pieces, its existing rows are
+  *re-pointed* — `Bound to` set on the same row — instead of pruned and recreated, so
+  page ids and validation state survive (validation concerns the schema, not the
+  Piece). Re-points show as `>` in the CI log. Extra Pieces on a property get new rows.
+- **No silent downgrade.** A legacy manifest for a Build that already has Piece-bound
+  rows fails the run rather than un-binding them.
+- `Build` is still written on every row and is still the prune scope.
 
 ### API-mediated dependencies (`via`)
 
