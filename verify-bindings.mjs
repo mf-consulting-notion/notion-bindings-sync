@@ -27,7 +27,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { discoverManifests, ownerManifestDir } from "./manifests.mjs";
+import { discoverManifests, ownerManifestDir, countExplicitUnresolved } from "./manifests.mjs";
 
 const SKIP_MARKER = "[skip-bindings-check]";
 const SKIP_LABEL = "skip-bindings-check";
@@ -172,6 +172,10 @@ function main() {
     return i === -1 ? "" : r.slice(0, i + 1);
   });
 
+  // Informational, never a failure: Unresolved (`"pieceId": null`) is a valid,
+  // reportable state — the executing Piece just hasn't been found yet.
+  reportUnresolved(manifestPaths, relManifests);
+
   // 2. Opt-out.
   const skip = skipReason(process.env.PR_TITLE, process.env.PR_LABELS);
   if (skip) pass(`bindings-verify: skipped — ${skip}.`);
@@ -242,6 +246,19 @@ function main() {
     `    or the "${SKIP_LABEL}" label, or add a path fragment to "verifyIgnore" in the owning bindings.json.`,
   ];
   fail(lines.join("\n"));
+}
+
+/** Log each manifest's explicitly Unresolved bindings (only when there are any). */
+function reportUnresolved(manifestPaths, relManifests) {
+  manifestPaths.forEach((p, i) => {
+    let n = 0;
+    try {
+      n = countExplicitUnresolved(JSON.parse(readFileSync(p, "utf8")));
+    } catch {
+      // unreadable/unparseable manifest → nothing to report; sync fails it loudly
+    }
+    if (n > 0) console.log(`bindings-verify: ${relManifests[i]} — ${n} binding(s) Unresolved (pieceId: null)`);
+  });
 }
 
 /** Union of every discovered manifest's verifyIgnore path fragments. */

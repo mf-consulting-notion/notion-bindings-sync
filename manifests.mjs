@@ -47,3 +47,21 @@ export function ownerManifestDir(file, manifestDirs) {
   }
   return owner;
 }
+
+/**
+ * How many bindings a manifest declares explicitly Unresolved (`"pieceId": null`
+ * on the binding, else its database entry, else the top level). Informational for
+ * the verify gate — tolerant of malformed manifests (0), since sync is where those
+ * fail.
+ */
+export function countExplicitUnresolved(manifest) {
+  if (!manifest || typeof manifest !== "object" || !Array.isArray(manifest.databases)) return 0;
+  const own = (holder, inherited) => (holder && Object.hasOwn(holder, "pieceId") ? holder.pieceId : inherited);
+  let n = 0;
+  for (const db of manifest.databases) {
+    if (!db || !Array.isArray(db.bindings)) continue;
+    const dbPiece = own(db, own(manifest, undefined));
+    for (const b of db.bindings) if (own(b, dbPiece) === null) n++;
+  }
+  return n;
+}

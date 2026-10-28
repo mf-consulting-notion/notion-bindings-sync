@@ -70,7 +70,7 @@ test("parseManifest: empty databases yields no desired rows", () => {
 // ---- computeDiff ---------------------------------------------------------
 
 const D = (over = {}) => ({ key: "db1::P1", propName: "Status", propertyId: "P1", dbId: "db1", direction: "both", ...over });
-const E = (over = {}) => ({ key: "db1::P1", pageId: "pg1", propName: "Status", dbId: "db1", direction: "Both", validationStatus: "Validated", ...over });
+const E = (over = {}) => ({ pageId: "pg1", propName: "Status", dbId: "db1", propertyId: "P1", direction: "Both", validationStatus: "Validated", pieceId: null, ...over });
 
 // --- page-body target -------------------------------------------------------
 // The body has no Notion property id, so it rides a reserved sentinel id and must
@@ -163,14 +163,14 @@ test("parseManifest: the body sentinel is scoped per database, not global", () =
 
 test("computeDiff: a body row diffs and prunes like any other row", () => {
   const [body] = parseManifest(bodyManifest({ target: "body", direction: "read" })).desired;
-  const created = computeDiff([body], new Map());
+  const created = computeDiff([body], []);
   assert.deepEqual(created.toCreate.map((d) => d.key), [body.key]);
 
-  const existing = new Map([[body.key, { key: body.key, pageId: "p1", propName: BODY_PROPERTY_NAME, dbId: "db1", direction: "Read", validationStatus: "Validated" }]]);
+  const existing = [{ pageId: "p1", propName: BODY_PROPERTY_NAME, dbId: "db1", propertyId: BODY_PROPERTY_ID, direction: "Read", validationStatus: "Validated", pieceId: null }];
   assert.equal(computeDiff([body], existing).unchanged, 1);
 
   const flipped = { ...body, direction: "both" };
-  assert.deepEqual(computeDiff([flipped], existing).toUpdate.map((d) => d.key), [body.key]);
+  assert.deepEqual(computeDiff([flipped], existing).toUpdate.map((c) => c.d.key), [body.key]);
 
   assert.deepEqual(computeDiff([], existing).toPrune.map((e) => e.pageId), ["p1"]);
 });
@@ -226,7 +226,7 @@ test("via: never reaches Notion, but is named in the CI log", async () => {
   await reconcileManifest(parsed, {
     dryRun: false,
     log: (m) => logs.push(m),
-    fetchExisting: async () => new Map(),
+    fetchExisting: async () => [],
     createRow: async (d) => created.push(d),
     updateRow: async () => {},
     archiveRow: async () => {},
@@ -238,7 +238,7 @@ test("via: never reaches Notion, but is named in the CI log", async () => {
 });
 
 test("computeDiff: new desired row -> create", () => {
-  const diff = computeDiff([D()], new Map());
+  const diff = computeDiff([D()], []);
   assert.equal(diff.toCreate.length, 1);
   assert.equal(diff.toUpdate.length, 0);
   assert.equal(diff.toPrune.length, 0);
@@ -246,36 +246,36 @@ test("computeDiff: new desired row -> create", () => {
 });
 
 test("computeDiff: identical existing row -> unchanged", () => {
-  const diff = computeDiff([D()], new Map([["db1::P1", E()]]));
+  const diff = computeDiff([D()], [E()]);
   assert.deepEqual([diff.toCreate.length, diff.toUpdate.length, diff.toPrune.length, diff.unchanged], [0, 0, 0, 1]);
 });
 
 test("computeDiff: direction change -> update", () => {
-  const diff = computeDiff([D({ direction: "read" })], new Map([["db1::P1", E({ direction: "Both" })]]));
+  const diff = computeDiff([D({ direction: "read" })], [E({ direction: "Both" })]);
   assert.equal(diff.toUpdate.length, 1);
   assert.equal(diff.unchanged, 0);
 });
 
 test("computeDiff: renamed property -> update", () => {
-  const diff = computeDiff([D({ propName: "State" })], new Map([["db1::P1", E({ propName: "Status" })]]));
+  const diff = computeDiff([D({ propName: "State" })], [E({ propName: "Status" })]);
   assert.equal(diff.toUpdate.length, 1);
 });
 
 test("computeDiff: existing row absent from desired -> prune", () => {
-  const diff = computeDiff([], new Map([["db1::P1", E()]]));
+  const diff = computeDiff([], [E()]);
   assert.equal(diff.toPrune.length, 1);
   assert.equal(diff.toPrune[0].pageId, "pg1");
 });
 
 test("computeDiff: empty validation status self-heals to update (pre-migration rows)", () => {
-  const diff = computeDiff([D()], new Map([["db1::P1", E({ validationStatus: "" })]]));
+  const diff = computeDiff([D()], [E({ validationStatus: "" })]);
   assert.equal(diff.toUpdate.length, 1);
   assert.equal(diff.unchanged, 0);
 });
 
 test("computeDiff: any non-empty validation status is respected on unchanged bindings", () => {
   for (const status of ["Validated", "Delta-validated", "Pending validation", "Stale", "Unverifiable"]) {
-    const diff = computeDiff([D()], new Map([["db1::P1", E({ validationStatus: status })]]));
+    const diff = computeDiff([D()], [E({ validationStatus: status })]);
     assert.equal(diff.toUpdate.length, 0, status);
     assert.equal(diff.unchanged, 1, status);
   }
@@ -293,7 +293,7 @@ function recorder(existingByBuild, { dryRun = false } = {}) {
     labelFor: (p) => p.label ?? "manifest",
     fetchExisting: (buildPageId) => {
       calls.fetched.push(buildPageId);
-      return new Map(existingByBuild[buildPageId] ?? []);
+      return existingByBuild[buildPageId] ?? [];
     },
     createRow: (d, b, w) => calls.create.push({ d, b, w }),
     updateRow: (pageId, d) => calls.update.push({ pageId, d }),
@@ -304,7 +304,7 @@ function recorder(existingByBuild, { dryRun = false } = {}) {
 
 test("reconcileManifest: applies create/update/prune via deps, scoped to its build", async () => {
   const existing = {
-    "build-A": [["db1::P1", E({ pageId: "pgA-stale", key: "db1::P1" })]],
+    "build-A": [E({ pageId: "pgA-stale" })],
   };
   const { deps, calls } = recorder(existing);
   const parsed = { buildPageId: "build-A", workspaceNotionId: "ws-1", desired: [D({ key: "db1::P2", propertyId: "P2" })] };
@@ -316,7 +316,7 @@ test("reconcileManifest: applies create/update/prune via deps, scoped to its bui
 });
 
 test("reconcileManifest: dryRun performs no writes", async () => {
-  const { deps, calls } = recorder({ "build-A": [["db1::P1", E()]] }, { dryRun: true });
+  const { deps, calls } = recorder({ "build-A": [E()] }, { dryRun: true });
   await reconcileManifest({ buildPageId: "build-A", workspaceNotionId: "w", desired: [] }, deps);
   assert.deepEqual([calls.create, calls.update, calls.archive], [[], [], []]);
 });
@@ -335,8 +335,8 @@ test("syncAll: processes every manifest", async () => {
 test("syncAll: prune isolation — build A never prunes build B's rows", async () => {
   // Each build's existing rows are distinct and stale (absent from desired).
   const existing = {
-    "build-A": [["dbA::PA", E({ key: "dbA::PA", pageId: "pgA", dbId: "dbA" })]],
-    "build-B": [["dbB::PB", E({ key: "dbB::PB", pageId: "pgB", dbId: "dbB" })]],
+    "build-A": [E({ pageId: "pgA", dbId: "dbA", propertyId: "PA" })],
+    "build-B": [E({ pageId: "pgB", dbId: "dbB", propertyId: "PB" })],
   };
   // A desires nothing (its stale row prunes); B desires its row (no prune).
   const mA = { label: "A", buildPageId: "build-A", workspaceNotionId: "w", databases: [] };
